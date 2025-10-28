@@ -17,24 +17,48 @@ const pool = new Pool({
     }
 });
 
+// --- [ALTERADO] --- Função de inicialização do banco mais robusta
 async function inicializarBanco() {
-    const createTableQuery = `
-    CREATE TABLE IF NOT EXISTS denuncias (
-        id SERIAL PRIMARY KEY,
-        protocolo VARCHAR(100) NOT NULL UNIQUE,
-        nome VARCHAR(255) NOT NULL,
-        email VARCHAR(255),
-        descricao TEXT,
-        status VARCHAR(50) DEFAULT 'Recebido',
-        prioridade VARCHAR(50), -- --- [NOVO] --- Adicionada coluna para prioridade
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    `;
+    const client = await pool.connect(); // Pega uma conexão do pool
     try {
-        await pool.query(createTableQuery);
-        console.log("Banco de dados inicializado. Tabela 'denuncias' pronta.");
+        // Passo 1: Garante que a tabela exista
+        const createTableQuery = `
+        CREATE TABLE IF NOT EXISTS denuncias (
+            id SERIAL PRIMARY KEY,
+            protocolo VARCHAR(100) NOT NULL UNIQUE,
+            nome VARCHAR(255) NOT NULL,
+            email VARCHAR(255),
+            descricao TEXT,
+            status VARCHAR(50) DEFAULT 'Recebido',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        `;
+        await client.query(createTableQuery);
+        console.log("Tabela 'denuncias' verificada/criada.");
+
+        // Passo 2: Verifica se a coluna 'prioridade' já existe
+        const checkColumnQuery = `
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name='denuncias' AND column_name='prioridade';
+        `;
+        const result = await client.query(checkColumnQuery);
+
+        // Passo 3: Se a coluna não existir, adiciona
+        if (result.rows.length === 0) {
+            console.log("Coluna 'prioridade' não encontrada. Adicionando à tabela...");
+            const addColumnQuery = `ALTER TABLE denuncias ADD COLUMN prioridade VARCHAR(50);`;
+            await client.query(addColumnQuery);
+            console.log("Coluna 'prioridade' adicionada com sucesso!");
+        } else {
+            console.log("Coluna 'prioridade' já existe.");
+        }
+
+        console.log("Banco de dados inicializado e schema atualizado.");
+
     } catch (err) {
-        console.error("Erro ao inicializar o banco de dados:", err);
+        console.error("Erro ao inicializar ou atualizar o schema do banco de dados:", err);
+    } finally {
+        client.release(); // Libera a conexão de volta para o pool
     }
 }
 
