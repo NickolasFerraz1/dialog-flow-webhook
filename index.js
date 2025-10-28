@@ -2,9 +2,8 @@
 const express = require('express');
 const app = express();
 const sgMail = require('@sendgrid/mail');
-const { Pool } = require('pg'); // <-- Importa a biblioteca do Postgres
+const { Pool } = require('pg');
 
-// Carrega as variáveis de ambiente
 require('dotenv').config();
 
 // --- CONFIGURAÇÃO DO SENDGRID ---
@@ -14,14 +13,10 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
-      rejectUnauthorized: false // Necessário para conexões com o Render
+      rejectUnauthorized: false
     }
 });
 
-/**
- * Cria a nossa tabela "denuncias" se ela ainda não existir.
- * Isso roda toda vez que o servidor inicia.
- */
 async function inicializarBanco() {
     const createTableQuery = `
     CREATE TABLE IF NOT EXISTS denuncias (
@@ -31,6 +26,7 @@ async function inicializarBanco() {
         email VARCHAR(255),
         descricao TEXT,
         status VARCHAR(50) DEFAULT 'Recebido',
+        prioridade VARCHAR(50), -- --- [NOVO] --- Adicionada coluna para prioridade
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     `;
@@ -42,8 +38,6 @@ async function inicializarBanco() {
     }
 }
 
-
-// Middleware para interpretar o corpo (body) da requisição como JSON
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
@@ -58,9 +52,6 @@ function gerarProtocolo() {
     return `SUP-${ano}${mes}${dia}-${aleatorio}`;
 }
 
-/**
- * [ITEM 1.a REALIZADO] Envia o ticket/denúncia por e-mail usando SendGrid.
- */
 async function enviarTicketPorEmail(dadosTicket) {
     console.log("--- INICIANDO ENVIO DE E-MAIL VIA SENDGRID (Item 1.a) ---");
     const msg = {
@@ -73,34 +64,67 @@ async function enviarTicketPorEmail(dadosTicket) {
             <li><strong>Protocolo:</strong> ${dadosTicket.protocolo}</li>
             <li><strong>Cliente:</strong> ${dadosTicket.nome}</li>
             <li><strong>E-mail do Cliente:</strong> ${dadosTicket.email}</li>
+            <li><strong>Prioridade:</strong> ${dadosTicket.prioridade}</li>
         </ul><hr><h4>Descrição do Problema</h4><p>${dadosTicket.descricao}</p>`
     };
     try {
         await sgMail.send(msg);
-        console.log("E-mail enviado com sucesso via SendGrid!");
+        console.log("E-mail de confirmação enviado com sucesso!");
         return true;
     } catch (error) {
-        console.error("Erro ao enviar e-mail pelo SendGrid:", error.response.body);
+        console.error("Erro ao enviar e-mail de confirmação:", error?.response?.body || error);
         return false;
     }
 }
 
-/**
- * [ITEM 1.d REALIZADO] Salva o núcleo da denúncia no banco de dados Postgres.
- */
+// --- [NOVO] --- Função para o Item 1.c
+async function enviarNotificacaoAntifraude(dadosTicket) {
+    console.log("--- INICIANDO NOTIFICAÇÃO PARA EQUIPE ANTIFRAUDE (Item 1.c) ---");
+    const emailEquipe = process.env.ANTIFRAUDE_EMAIL;
+
+    if (!emailEquipe) {
+        console.error("Variável de ambiente ANTIFRAUDE_EMAIL não definida. Notificação não enviada.");
+        return false;
+    }
+
+    const msg = {
+        from: { email: 'ct.sprint4@gmail.com', name: 'Bot Alerta de Risco' },
+        to: emailEquipe,
+        subject: `ALERTA: Nova Denúncia de ALTA PRIORIDADE - Protocolo: ${dadosTicket.protocolo}`,
+        html: `
+        <h3>ALERTA DE ALTA PRIORIDADE</h3>
+        <p>Uma nova denúncia classificada como alta prioridade foi registrada e requer atenção imediata.</p>
+        <ul>
+            <li><strong>Protocolo:</strong> ${dadosTicket.protocolo}</li>
+            <li><strong>Denunciante:</strong> ${dadosTicket.nome}</li>
+            <li><strong>E-mail:</strong> ${dadosTicket.email}</li>
+            <li><strong>Prioridade:</strong> ${dadosTicket.prioridade}</li>
+        </ul><hr><h4>Descrição da Denúncia</h4><p>${dadosTicket.descricao}</p>`
+    };
+    try {
+        await sgMail.send(msg);
+        console.log(`Notificação de alta prioridade enviada para ${emailEquipe}!`);
+        return true;
+    } catch (error) {
+        console.error("Erro ao enviar notificação de alta prioridade:", error?.response?.body || error);
+        return false;
+    }
+}
+
 async function salvarNoBancoPostgres(dadosTicket) {
     console.log("--- INICIANDO SALVAMENTO NO POSTGRES (Item 1.d) ---");
-    
+    // --- [ALTERADO] --- Query agora inclui a coluna 'prioridade'
     const query = `
-        INSERT INTO denuncias (protocolo, nome, email, descricao)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO denuncias (protocolo, nome, email, descricao, prioridade)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id;
     `;
     const valores = [
         dadosTicket.protocolo,
         dadosTicket.nome,
         dadosTicket.email,
-        dadosTicket.descricao
+        dadosTicket.descricao,
+        dadosTicket.prioridade // --- [ALTERADO] --- Adicionado novo valor
     ];
 
     try {
@@ -115,98 +139,72 @@ async function salvarNoBancoPostgres(dadosTicket) {
 
 // --- ROTA PRINCIPAL DO WEBHOOK ---
 app.post('/webhook', async (req, res) => {
-    console.log('Requisição recebida do Dialogflow:');
     const intentName = req.body.queryResult.intent.displayName;
 
-    // --- [FLUXO 1] ITEM 1.a - ABRIR CHAMADO ---
     if (intentName === 'AbrirChamadoSuporte') {
         try {
-            // 1. Extrair dados
-            const nomeParam = req.body.queryResult.parameters.nome;
+            // --- [ALTERADO] --- Extrai o novo parâmetro 'prioridade'
+            const parameters = req.body.queryResult.parameters;
+            const nomeParam = parameters.nome;
             const nome = (nomeParam && nomeParam.name) ? nomeParam.name : (nomeParam || 'Não informado');
-            const descricaoProblema = req.body.queryResult.parameters.descricao_problema;
+            const descricaoProblema = parameters.descricao_problema;
+            const prioridade = parameters.prioridade; // <-- NOVO
+
             let email = 'Não informado';
             const contextoEmail = req.body.queryResult.outputContexts.find(ctx => ctx.parameters && ctx.parameters.email);
             if (contextoEmail) {
                 email = contextoEmail.parameters.email;
             }
 
-            // 2. Validar
-            if (!nomeParam || !descricaoProblema) {
-                return res.json({ fulfillmentMessages: [{ text: { text: ['Parece que o seu nome ou a descrição do problema não foram informados. Por favor, tente novamente.'] } }] });
-            }
-
-            // 3. Lógica de negócio
             const protocolo = gerarProtocolo();
-            const dadosTicket = { protocolo, nome, email, descricao: descricaoProblema };
+            const dadosTicket = { protocolo, nome, email, descricao: descricaoProblema, prioridade };
 
-            // 4. Integrações (AGORA AS DUAS SÃO REAIS!)
-            const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket); // <-- MUDOU
+            // --- [NOVO] --- Lógica de Notificação do Item 1.c
+            if (prioridade && prioridade.toLowerCase() === 'alta') {
+                await enviarNotificacaoAntifraude(dadosTicket);
+            }
+            
+            // --- [ALTERADO] --- Continua o fluxo normal
+            const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket);
             const emailEnviado = await enviarTicketPorEmail(dadosTicket);
             
-            // 5. Resposta
             if (emailEnviado && salvoNoBanco) {
-                const mensagemConfirmacao = `Ok, ${nome}! Seu chamado sobre "${descricaoProblema}" foi aberto com sucesso. O número do seu ticket é ${protocolo}. Uma confirmação foi enviada para ${email}.`;
+                const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. Uma confirmação foi enviada para ${email}.`;
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
             } else {
-                throw new Error("Falha ao salvar no banco ou enviar e-mail.");
+                throw new Error("Falha ao salvar no banco ou enviar e-mail de confirmação.");
             }
         } catch (error) {
-            console.error("Erro ao processar o webhook (AbrirChamadoSuporte):", error);
-            return res.json({ fulfillmentMessages: [{ text: { text: ['Desculpe, ocorreu um erro interno ao processar seu chamado. Nossa equipe já foi notificada. Por favor, tente mais tarde.'] } }] });
+            console.error("Erro ao processar webhook (AbrirChamadoSuporte):", error);
+            return res.json({ fulfillmentMessages: [{ text: { text: ['Desculpe, ocorreu um erro interno. Nossa equipe já foi notificada.'] } }] });
         }
     
-    // --- [NOVO FLUXO] ITEM 1.b - CONSULTAR STATUS ---
     } else if (intentName === 'consultar-status') {
-        console.log("--- EXECUTANDO INTENT: consultar-status (Item 1.b) ---");
-
-        // 1. Extrai o parâmetro "protocolo"
         const protocolo = req.body.queryResult.parameters.protocolo;
-        
-        // 2. Validação
         if (!protocolo || protocolo.trim() === '') {
-            const responseText = 'Não entendi o número do protocolo. Poderia repetir?';
-            return res.json({ fulfillmentMessages: [{ text: { text: [responseText] } }] });
+            return res.json({ fulfillmentMessages: [{ text: { text: ['Não entendi o número do protocolo. Poderia repetir?'] } }] });
         }
-
-        console.log(`Recebida consulta para o protocolo: ${protocolo}`);
-
         try {
-            // 3. Conecta no banco e faz a consulta
-            // (Usando os nomes da sua tabela: 'denuncias' e 'status')
             const query = 'SELECT status FROM denuncias WHERE protocolo = $1';
             const result = await pool.query(query, [protocolo]);
-    
             let responseText = '';
-    
-            // 4. Verifica o resultado da consulta
             if (result.rows.length > 0) {
-                // Se encontrou o protocolo, pega o status
-                const status = result.rows[0].status;
-                responseText = `O status do seu protocolo ${protocolo} é: ${status}.`;
+                responseText = `O status do seu protocolo ${protocolo} é: ${result.rows[0].status}.`;
             } else {
-                // Se não encontrou, informa o usuário
                 responseText = `Não foi possível encontrar uma denúncia com o protocolo ${protocolo}. Por favor, verifique o número e tente novamente.`;
             }
-    
-            // 5. Envia a resposta de volta para o Dialogflow
             return res.json({ fulfillmentMessages: [{ text: { text: [responseText] } }] });
-    
         } catch (error) {
-            console.error('Erro ao consultar o banco de dados (consultar-status):', error);
-            const responseText = 'Ocorreu um erro ao consultar o status da sua denúncia. Por favor, tente novamente mais tarde.';
-            return res.json({ fulfillmentMessages: [{ text: { text: [responseText] } }] });
+            console.error('Erro ao consultar o banco (consultar-status):', error);
+            return res.json({ fulfillmentMessages: [{ text: { text: ['Ocorreu um erro ao consultar o status. Tente novamente mais tarde.'] } }] });
         }
-
-    // --- [FLUXO PADRÃO] INTENT NÃO TRATADA ---
     } else {
-        return res.json({ fulfillmentMessages: [{ text: { text: [`Desculpe, não consegui processar sua solicitação. A intent "${intentName}" não é tratada por este webhook.`] } }] });
+        return res.json({ fulfillmentMessages: [{ text: { text: [`Intent "${intentName}" não tratada por este webhook.`] } }] });
     }
 });
 
 // --- INICIA O SERVIDOR ---
 app.listen(PORT, () => {
     console.log(`Servidor do webhook rodando na porta ${PORT}`);
-    // Chama a função para criar a tabela assim que o servidor ligar
     inicializarBanco();
 });
