@@ -1,29 +1,21 @@
 // index.js
 const express = require('express');
 const app = express();
-const nodemailer = require('nodemailer'); // Importa o nodemailer
 
-// Carrega as variáveis de ambiente (EMAIL_USER, EMAIL_PASS) do arquivo .env
-// Garanta que você tenha o arquivo .env no mesmo diretório
+// Importa a biblioteca do SendGrid
+const sgMail = require('@sendgrid/mail');
+
+// Carrega as variáveis de ambiente (SENDGRID_API_KEY) do arquivo .env
 require('dotenv').config();
+
+// Configura o SendGrid com a sua API Key (lida do .env ou do Render)
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // Middleware para interpretar o corpo (body) da requisição como JSON
 app.use(express.json());
 
 // Define a porta do servidor
 const PORT = process.env.PORT || 3000;
-
-// --- CONFIGURAÇÃO DO NODEMAILER (Transportador) ---
-// Criamos o "transportador" que usará o Gmail para enviar os e-mails
-// Isso só é criado uma vez quando o servidor liga
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-        user: process.env.EMAIL_USER, // Seu e-mail do Gmail (do .env)
-        pass: process.env.EMAIL_PASS  // Sua "Senha de App" de 16 letras (do .env)
-    }
-});
-
 
 // --- FUNÇÕES AUXILIARES DA SPRINT 4 ---
 
@@ -37,28 +29,31 @@ function gerarProtocolo() {
 }
 
 /**
- * [ITEM 1.a REALIZADO] Envia o ticket/denúncia por e-mail para a equipe operacional.
+ * [ITEM 1.a REALIZADO] Envia o ticket/denúncia por e-mail usando SendGrid.
  */
 async function enviarTicketPorEmail(dadosTicket) {
-    console.log("--- INICIANDO ENVIO DE E-MAIL REAL (Item 1.a) ---");
+    console.log("--- INICIANDO ENVIO DE E-MAIL VIA SENDGRID (Item 1.a) ---");
 
-    const mailOptions = {
-        from: `"Bot de Suporte" <${process.env.EMAIL_USER}>`, // Remetente
-        to: "nickao69ferraz@gmail.com, " + dadosTicket.email, // Destinatários (equipe E o cliente)
-        subject: `Novo Chamado: ${dadosTicket.protocolo} - ${dadosTicket.descricao.substring(0, 30)}...`, // Assunto
-        // Corpo do e-mail em texto simples
-        text: `
-        Um novo chamado foi aberto pelo chatbot.
-
-        --- DADOS DO CHAMADO ---
-        Protocolo: ${dadosTicket.protocolo}
-        Cliente: ${dadosTicket.nome}
-        E-mail do Cliente: ${dadosTicket.email}
+    const msg = {
+        // ATENÇÃO: Mude este e-mail para o e-mail que você VERIFICOU no SendGrid
+        from: {
+            email: 'ct.sprint4@gmail.com', // <-- SEU E-MAIL VERIFICADO
+            name: 'Bot de Suporte'
+        },
         
-        --- DESCRIÇÃO DO PROBLEMA ---
-        ${dadosTicket.descricao}
-        `,
-        // Corpo do e-mail em HTML (para ficar mais bonito)
+        // Para quem o e-mail vai
+        to: [
+            'nickao69ferraz@gmail.com', // <-- Mude para o e-mail da sua "equipe" (pode ser você)
+            dadosTicket.email               // E-mail do cliente
+        ],
+        
+        // Assunto
+        subject: `Novo Chamado: ${dadosTicket.protocolo} - ${dadosTicket.descricao.substring(0, 30)}...`,
+        
+        // Corpo em texto (para clientes de e-mail que não suportam HTML)
+        text: `Um novo chamado foi aberto pelo chatbot. Protocolo: ${dadosTicket.protocolo}, Cliente: ${dadosTicket.nome}, Descrição: ${dadosTicket.descricao}`,
+        
+        // Corpo em HTML
         html: `
         <h3>Novo Chamado Aberto via Chatbot</h3>
         <p>Um novo chamado foi registrado com os seguintes dados:</p>
@@ -74,12 +69,14 @@ async function enviarTicketPorEmail(dadosTicket) {
     };
 
     try {
-        // Envia o e-mail usando o transportador que configuramos
-        let info = await transporter.sendMail(mailOptions);
-        console.log("E-mail enviado com sucesso! Message ID: " + info.messageId);
+        await sgMail.send(msg); // Envia o e-mail
+        console.log("E-mail enviado com sucesso via SendGrid!");
         return true; // Sucesso
     } catch (error) {
-        console.error("Erro ao enviar e-mail:", error);
+        console.error("Erro ao enviar e-mail pelo SendGrid:", error);
+        if (error.response) {
+            console.error(error.response.body) // Mostra detalhes do erro da API
+        }
         return false; // Falha
     }
 }
@@ -98,8 +95,7 @@ async function salvarNoBancoMySQL(dadosTicket) {
 // --- ROTA PRINCIPAL DO WEBHOOK ---
 app.post('/webhook', async (req, res) => { // Marcamos como 'async'
     console.log('Requisição recebida do Dialogflow:');
-    // console.log(JSON.stringify(req.body, null, 2)); // Descomente para depurar
-
+    
     const intentName = req.body.queryResult.intent.displayName;
 
     if (intentName === 'AbrirChamadoSuporte') {
@@ -107,7 +103,9 @@ app.post('/webhook', async (req, res) => { // Marcamos como 'async'
             // 1. Extrair parâmetros
             const nomeParam = req.body.queryResult.parameters.nome;
             const nome = (nomeParam && nomeParam.name) ? nomeParam.name : (nomeParam || 'Não informado');
-            const descricaoProblema = req.body.queryResult.parameters.descricao_problema;
+            
+            // Corrigido para "descricao_problema" (conforme seu log)
+            const descricaoProblema = req.body.queryResult.parameters.descricao_problema; 
 
             // 1.b Extrair o e-mail do contexto
             let email = 'Não informado';
@@ -118,6 +116,7 @@ app.post('/webhook', async (req, res) => { // Marcamos como 'async'
 
             // 2. Validar os dados
             if (!nomeParam || !descricaoProblema) {
+                console.warn("Dados faltando: ", req.body.queryResult.parameters);
                 return res.json({ fulfillmentMessages: [{ text: { text: ['Parece que o seu nome ou a descrição do problema não foram informados. Por favor, tente novamente.'] } }] });
             }
 
@@ -142,7 +141,7 @@ app.post('/webhook', async (req, res) => { // Marcamos como 'async'
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
 
             } else {
-                throw new Error("Falha ao enviar e-mail de confirmação.");
+                throw new Error("Falha ao enviar e-mail de confirmação via SendGrid.");
             }
 
         } catch (error) {
@@ -160,3 +159,4 @@ app.post('/webhook', async (req, res) => { // Marcamos como 'async'
 app.listen(PORT, () => {
     console.log(`Servidor do webhook rodando na porta ${PORT}`);
 });
+
