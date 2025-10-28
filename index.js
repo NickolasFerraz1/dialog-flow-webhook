@@ -2,7 +2,7 @@
 const express = require('express');
 const app = express();
 const sgMail = require('@sendgrid/mail');
-const { Pool } = require('pg'); // <-- NOVO: Importa a biblioteca do Postgres
+const { Pool } = require('pg'); // <-- Importa a biblioteca do Postgres
 
 // Carrega as variáveis de ambiente
 require('dotenv').config();
@@ -19,7 +19,7 @@ const pool = new Pool({
 });
 
 /**
- * [NOVO] Cria a nossa tabela "denuncias" se ela ainda não existir.
+ * Cria a nossa tabela "denuncias" se ela ainda não existir.
  * Isso roda toda vez que o servidor inicia.
  */
 async function inicializarBanco() {
@@ -118,6 +118,7 @@ app.post('/webhook', async (req, res) => {
     console.log('Requisição recebida do Dialogflow:');
     const intentName = req.body.queryResult.intent.displayName;
 
+    // --- [FLUXO 1] ITEM 1.a - ABRIR CHAMADO ---
     if (intentName === 'AbrirChamadoSuporte') {
         try {
             // 1. Extrair dados
@@ -151,9 +152,53 @@ app.post('/webhook', async (req, res) => {
                 throw new Error("Falha ao salvar no banco ou enviar e-mail.");
             }
         } catch (error) {
-            console.error("Erro ao processar o webhook:", error);
+            console.error("Erro ao processar o webhook (AbrirChamadoSuporte):", error);
             return res.json({ fulfillmentMessages: [{ text: { text: ['Desculpe, ocorreu um erro interno ao processar seu chamado. Nossa equipe já foi notificada. Por favor, tente mais tarde.'] } }] });
         }
+    
+    // --- [NOVO FLUXO] ITEM 1.b - CONSULTAR STATUS ---
+    } else if (intentName === 'consultar-status') {
+        console.log("--- EXECUTANDO INTENT: consultar-status (Item 1.b) ---");
+
+        // 1. Extrai o parâmetro "protocolo"
+        const protocolo = req.body.queryResult.parameters.protocolo;
+        
+        // 2. Validação
+        if (!protocolo || protocolo.trim() === '') {
+            const responseText = 'Não entendi o número do protocolo. Poderia repetir?';
+            return res.json({ fulfillmentMessages: [{ text: { text: [responseText] } }] });
+        }
+
+        console.log(`Recebida consulta para o protocolo: ${protocolo}`);
+
+        try {
+            // 3. Conecta no banco e faz a consulta
+            // (Usando os nomes da sua tabela: 'denuncias' e 'status')
+            const query = 'SELECT status FROM denuncias WHERE protocolo = $1';
+            const result = await pool.query(query, [protocolo]);
+    
+            let responseText = '';
+    
+            // 4. Verifica o resultado da consulta
+            if (result.rows.length > 0) {
+                // Se encontrou o protocolo, pega o status
+                const status = result.rows[0].status;
+                responseText = `O status do seu protocolo ${protocolo} é: ${status}.`;
+            } else {
+                // Se não encontrou, informa o usuário
+                responseText = `Não foi possível encontrar uma denúncia com o protocolo ${protocolo}. Por favor, verifique o número e tente novamente.`;
+            }
+    
+            // 5. Envia a resposta de volta para o Dialogflow
+            return res.json({ fulfillmentMessages: [{ text: { text: [responseText] } }] });
+    
+        } catch (error) {
+            console.error('Erro ao consultar o banco de dados (consultar-status):', error);
+            const responseText = 'Ocorreu um erro ao consultar o status da sua denúncia. Por favor, tente novamente mais tarde.';
+            return res.json({ fulfillmentMessages: [{ text: { text: [responseText] } }] });
+        }
+
+    // --- [FLUXO PADRÃO] INTENT NÃO TRATADA ---
     } else {
         return res.json({ fulfillmentMessages: [{ text: { text: [`Desculpe, não consegui processar sua solicitação. A intent "${intentName}" não é tratada por este webhook.`] } }] });
     }
@@ -162,6 +207,6 @@ app.post('/webhook', async (req, res) => {
 // --- INICIA O SERVIDOR ---
 app.listen(PORT, () => {
     console.log(`Servidor do webhook rodando na porta ${PORT}`);
-    // [NOVO] Chama a função para criar a tabela assim que o servidor ligar
+    // Chama a função para criar a tabela assim que o servidor ligar
     inicializarBanco();
 });
