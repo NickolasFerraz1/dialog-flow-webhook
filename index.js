@@ -2,15 +2,16 @@
 const express = require('express');
 const app = express();
 const sgMail = require('@sendgrid/mail');
-const { Pool } = require('pg'); // Driver Postgres
-const { MongoClient, ServerApiVersion } = require('mongodb'); // Driver MongoDB
+const { Pool } = require('pg'); 
+const { MongoClient, ServerApiVersion } = require('mongodb'); 
+const { Buffer } = require('buffer'); // --- [NOVO] --- Necessário para decodificar a senha
 
 require('dotenv').config();
 
-// --- CONFIGURAÇÃO DO SENDGRID ---
+// --- CONFIGURAÇÕES (SendGrid, Postgres, MongoDB) ---
+// ... (toda a sua configuração de sgMail, pool, e mongoClient permanece a mesma) ...
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-// --- CONFIGURAÇÃO DO BANCO DE DADOS (POSTGRES) ---
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
@@ -18,7 +19,6 @@ const pool = new Pool({
     }
 });
 
-// --- CONFIGURAÇÃO DO BANCO DE DADOS (MONGODB) ---
 const mongoUri = process.env.MONGO_URI;
 const mongoClient = new MongoClient(mongoUri, {
   serverApi: {
@@ -29,6 +29,8 @@ const mongoClient = new MongoClient(mongoUri, {
 });
 let logDB; 
 
+// --- SISTEMA DE LOGS (salvarLog, logInfo, logError) ---
+// ... (todas as suas funções de log permanecem as mesmas) ...
 async function conectarMongo() {
     try {
         await mongoClient.connect();
@@ -40,9 +42,6 @@ async function conectarMongo() {
         console.error("ERRO CRÍTICO AO CONECTAR NO MONGODB:", err);
     }
 }
-// --- Fim da Configuração do MongoDB ---
-
-// --- SISTEMA DE LOGS ESTRUTURADOS (Item 3.a) ---
 async function salvarLog(level, component, message, context = {}) {
     const logEntry = {
         timestamp: new Date(),
@@ -78,14 +77,12 @@ const logError = (component, message, error, context) => {
     };
     salvarLog('ERROR', component, message, { ...context, error: errorDetails });
 };
-// --- Fim do Sistema de Logs ---
 
-
-// --- Função de inicialização do banco Postgres ---
+// --- FUNÇÕES DE BANCO (inicializarBanco, salvarNoBancoPostgres) ---
+// ... (suas funções de banco permanecem as mesmas) ...
 async function inicializarBanco() {
     const client = await pool.connect(); 
     try {
-        // Passo 1: Garante que a tabela exista
         const createTableQuery = `
         CREATE TABLE IF NOT EXISTS denuncias (
             id SERIAL PRIMARY KEY,
@@ -100,7 +97,6 @@ async function inicializarBanco() {
         await client.query(createTableQuery);
         logInfo("Postgres", "Tabela 'denuncias' verificada/criada.");
 
-        // Objeto para verificar colunas
         const colunas = {
             'prioridade': `ALTER TABLE denuncias ADD COLUMN prioridade VARCHAR(50);`,
             'data_ocorrido': `ALTER TABLE denuncias ADD COLUMN data_ocorrido TIMESTAMP WITH TIME ZONE;`,
@@ -122,7 +118,6 @@ async function inicializarBanco() {
             }
         }
 
-        // Verifica e AJUSTA a coluna 'status' (Remove DEFAULT)
         const checkStatusQuery = `
         SELECT column_default FROM information_schema.columns 
         WHERE table_name='denuncias' AND column_name='status';
@@ -135,83 +130,13 @@ async function inicializarBanco() {
         } else {
             logInfo("Postgres", "Coluna 'status' já está configurada corretamente (sem DEFAULT).");
         }
-
         logInfo("Postgres", "Banco de dados inicializado e schema atualizado.");
-
     } catch (err) {
         logError("Postgres", "Erro ao inicializar ou atualizar o schema", err);
     } finally {
         client.release(); 
     }
 }
-
-
-app.use(express.json());
-const PORT = process.env.PORT || 3000;
-
-// --- FUNÇÕES AUXILIARES ---
-
-function gerarProtocolo() {
-    const data = new Date();
-    const ano = data.getFullYear();
-    const mes = (data.getMonth() + 1).toString().padStart(2, '0');
-    const dia = data.getDate().toString().padStart(2, '0');
-    const aleatorio = Math.floor(10000 + Math.random() * 90000);
-    return `SUP-${ano}${mes}${dia}-${aleatorio}`;
-}
-
-async function enviarTicketPorEmail(dadosTicket) {
-    logInfo("SendGrid", "Iniciando envio de e-mail de confirmação", { protocolo: dadosTicket.protocolo, email: dadosTicket.email });
-    
-    const msg = {
-        from: { email: 'ct.sprint4@gmail.com', name: 'Bot de Suporte' },
-        to: ['ct.sprint4@gmail.com'], // E-mail de suporte sempre
-        subject: `Novo Chamado: ${dadosTicket.protocolo} - ${dadosTicket.titulo}`, // Usa o novo título
-        html: dadosTicket.descricao // Usa a descrição padronizada
-    };
-
-    // Adiciona o e-mail do cliente APENAS se ele for válido
-    if (dadosTicket.email && dadosTicket.email.includes('@')) {
-        msg.to.push(dadosTicket.email);
-        logInfo("SendGrid", `Email do cliente ('${dadosTicket.email}') é válido. Adicionando à lista de destinatários.`, { protocolo: dadosTicket.protocolo });
-    } else {
-        logInfo("SendGrid", `Email do cliente ('${dadosTicket.email}') é inválido ou não informado. Envio será feito apenas para o suporte.`, { protocolo: dadosTicket.protocolo });
-    }
-
-    try {
-        await sgMail.send(msg);
-        logInfo("SendGrid", "E-mail de confirmação enviado com sucesso!", { protocolo: dadosTicket.protocolo });
-        return true;
-    } catch (error) {
-        logError("SendGrid", "Erro ao enviar e-mail de confirmação", error, { protocolo: dadosTicket.protocolo });
-        return false;
-    }
-}
-
-async function enviarNotificacaoAntifraude(dadosTicket) {
-    logInfo("SendGrid", "Iniciando notificação para equipe antifraude (Alta Prioridade)", { protocolo: dadosTicket.protocolo });
-    const emailEquipe = process.env.ANTIFRAUDE_EMAIL;
-    if (!emailEquipe) {
-        logError("SendGrid", "Variável de ambiente ANTIFRAUDE_EMAIL não definida. Notificação não enviada.", new Error("ANTIFRAUDE_EMAIL is not set"), { protocolo: dadosTicket.protocolo });
-        return false;
-    }
-   
-    const msg = {
-        from: { email: 'ct.sprint4@gmail.com', name: 'Bot Alerta de Risco' },
-        to: emailEquipe,
-        subject: `ALERTA (Revisão Pendente): Nova Denúncia de ALTA PRIORIDADE - Protocolo: ${dadosTicket.protocolo}`,
-        html: dadosTicket.descricao // Usa a descrição padronizada
-    };
-    try {
-        await sgMail.send(msg);
-        logInfo("SendGrid", `Notificação de alta prioridade enviada para ${emailEquipe}!`, { protocolo: dadosTicket.protocolo });
-        return true;
-    } catch (error) {
-        logError("SendGrid", "Erro ao enviar notificação de alta prioridade", error, { protocolo: dadosTicket.protocolo });
-        return false;
-    }
-}
-
 async function salvarNoBancoPostgres(dadosTicket) {
     logInfo("Postgres", `Iniciando salvamento no Postgres. Status: ${dadosTicket.status}`, { protocolo: dadosTicket.protocolo });
     
@@ -242,13 +167,123 @@ async function salvarNoBancoPostgres(dadosTicket) {
 }
 
 
+// --- FUNÇÕES DE E-MAIL (gerarProtocolo, enviarTicketPorEmail, enviarNotificacaoAntifraude) ---
+// ... (suas funções de e-mail permanecem as mesmas) ...
+function gerarProtocolo() {
+    const data = new Date();
+    const ano = data.getFullYear();
+    const mes = (data.getMonth() + 1).toString().padStart(2, '0');
+    const dia = data.getDate().toString().padStart(2, '0');
+    const aleatorio = Math.floor(10000 + Math.random() * 90000);
+    return `SUP-${ano}${mes}${dia}-${aleatorio}`;
+}
+async function enviarTicketPorEmail(dadosTicket) {
+    logInfo("SendGrid", "Iniciando envio de e-mail de confirmação", { protocolo: dadosTicket.protocolo, email: dadosTicket.email });
+    
+    const msg = {
+        from: { email: 'ct.sprint4@gmail.com', name: 'Bot de Suporte' },
+        to: ['ct.sprint4@gmail.com'], 
+        subject: `Novo Chamado: ${dadosTicket.protocolo} - ${dadosTicket.titulo}`, 
+        html: dadosTicket.descricao 
+    };
+    if (dadosTicket.email && dadosTicket.email.includes('@')) {
+        msg.to.push(dadosTicket.email);
+        logInfo("SendGrid", `Email do cliente ('${dadosTicket.email}') é válido. Adicionando à lista de destinatários.`, { protocolo: dadosTicket.protocolo });
+    } else {
+        logInfo("SendGrid", `Email do cliente ('${dadosTicket.email}') é inválido ou não informado. Envio será feito apenas para o suporte.`, { protocolo: dadosTicket.protocolo });
+    }
+
+    try {
+        await sgMail.send(msg);
+        logInfo("SendGrid", "E-mail de confirmação enviado com sucesso!", { protocolo: dadosTicket.protocolo });
+        return true;
+    } catch (error) {
+        logError("SendGrid", "Erro ao enviar e-mail de confirmação", error, { protocolo: dadosTicket.protocolo });
+        return false;
+    }
+}
+async function enviarNotificacaoAntifraude(dadosTicket) {
+    logInfo("SendGrid", "Iniciando notificação para equipe antifraude (Alta Prioridade)", { protocolo: dadosTicket.protocolo });
+    const emailEquipe = process.env.ANTIFRAUDE_EMAIL;
+    if (!emailEquipe) {
+        logError("SendGrid", "Variável de ambiente ANTIFRAUDE_EMAIL não definida. Notificação não enviada.", new Error("ANTIFRAUDE_EMAIL is not set"), { protocolo: dadosTicket.protocolo });
+        return false;
+    }
+   
+    const msg = {
+        from: { email: 'ct.sprint4@gmail.com', name: 'Bot Alerta de Risco' },
+        to: emailEquipe,
+        subject: `ALERTA (Revisão Pendente): Nova Denúncia de ALTA PRIORIDADE - Protocolo: ${dadosTicket.protocolo}`,
+        html: dadosTicket.descricao 
+    };
+    try {
+        await sgMail.send(msg);
+        logInfo("SendGrid", `Notificação de alta prioridade enviada para ${emailEquipe}!`, { protocolo: dadosTicket.protocolo });
+        return true;
+    } catch (error) {
+        logError("SendGrid", "Erro ao enviar notificação de alta prioridade", error, { protocolo: dadosTicket.protocolo });
+        return false;
+    }
+}
+
+
+// --- CONFIGURAÇÃO DO SERVIDOR ---
+app.use(express.json());
+const PORT = process.env.PORT || 3000;
+
+
+// --- [NOVO] --- MIDDLEWARE DE AUTENTICAÇÃO (Item 3.b) ---
+/**
+ * Este middleware verifica a autenticação Basic vinda do Dialogflow
+ */
+function checkAuth(req, res, next) {
+    logInfo("Auth", "Verificando autenticação do webhook...");
+    
+    const authHeader = req.headers['authorization'];
+    
+    if (!authHeader) {
+        logError("Auth", "Falha de autenticação: Cabeçalho de autorização ausente.", new Error('Missing Auth Header'));
+        return res.status(401).json({ error: 'Não autorizado. Cabeçalho de autenticação ausente.' });
+    }
+
+    // O cabeçalho vem como "Basic dXNlcjpwYXNz"
+    const [type, credentials] = authHeader.split(' ');
+
+    if (type !== 'Basic' || !credentials) {
+        logError("Auth", "Falha de autenticação: Formato de cabeçalho incorreto. Esperado 'Basic <token>'.", new Error('Invalid Auth Header format'));
+        return res.status(401).json({ error: 'Não autorizado. Formato de autenticação inválido.' });
+    }
+
+    // Decodifica as credenciais de Base64 para "usuario:senha"
+    const decoded = Buffer.from(credentials, 'base64').toString('ascii');
+    const [user, pass] = decoded.split(':');
+
+    const expectedUser = process.env.WEBHOOK_USER;
+    const expectedPass = process.env.WEBHOOK_PASS;
+
+    // Compara com as variáveis de ambiente
+    if (user === expectedUser && pass === expectedPass) {
+        logInfo("Auth", "Autenticação bem-sucedida.", { user });
+        next(); // Sucesso! Continua para a rota '/webhook'
+    } else {
+        logError("Auth", "Falha de autenticação: Credenciais inválidas.", new Error('Invalid credentials'), { user });
+        return res.status(401).json({ error: 'Não autorizado. Credenciais inválidas.' });
+    }
+}
+// --- Fim do Middleware ---
+
+
 // --- ROTA PRINCIPAL DO WEBHOOK ---
-app.post('/webhook', async (req, res) => {
+// --- [ALTERADO] --- Adicionamos o middleware 'checkAuth'
+// Agora, toda chamada a /webhook DEVE passar pelo 'checkAuth' primeiro.
+app.post('/webhook', checkAuth, async (req, res) => {
+    // Se o código chegou aqui, a autenticação foi um SUCESSO.
+    
     const intentName = req.body.queryResult.intent.displayName;
     const dialogflowSessionId = req.body.session.split('/').pop();
     let traceContext = { intentName, dialogflowSessionId };
 
-    logInfo("Webhook", "Nova requisição recebida do Dialogflow", traceContext);
+    logInfo("Webhook", "Nova requisição recebida (pós-autenticação)", traceContext);
 
     if (intentName === 'AbrirChamadoSuporte') {
         let protocolo; 
@@ -261,24 +296,18 @@ app.post('/webhook', async (req, res) => {
             const prioridade = parameters.prioridade; 
             const dataOcorridoStr = parameters.data_ocorrido; 
 
-            // --- [ALTERADO] --- Lógica de busca de e-mail mais robusta
             let email = 'Não informado';
             if (parameters.email && parameters.email !== '') {
-                // 1. Verifica se o e-mail foi passado como parâmetro na *própria* intent
                 email = parameters.email;
             } else if (req.body.queryResult.outputContexts && req.body.queryResult.outputContexts.length > 0) {
-                // 2. Se não, procura em TODOS os contextos de saída
                 for (const ctx of req.body.queryResult.outputContexts) {
-                    // Verifica se o contexto tem parâmetros E se o parâmetro 'email' existe e não está vazio
                     if (ctx.parameters && ctx.parameters.email && ctx.parameters.email !== '') {
                         email = ctx.parameters.email;
-                        break; // Para assim que encontrar o primeiro e-mail
+                        break; 
                     }
                 }
             }
-            // --- Fim da alteração ---
-
-            traceContext.email = email; // Adiciona e-mail ao contexto de log
+            traceContext.email = email; 
 
             // --- 2. Validação de Data (Item 2.b) ---
             const dataOcorrido = new Date(dataOcorridoStr);
@@ -397,4 +426,3 @@ app.listen(PORT, () => {
     inicializarBanco(); // Postgres
     conectarMongo();    // MongoDB
 });
-
