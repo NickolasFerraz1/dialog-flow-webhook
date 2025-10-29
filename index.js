@@ -2,24 +2,25 @@
 const express = require('express');
 const app = express();
 const sgMail = require('@sendgrid/mail');
-const { Pool } = require('pg'); 
-const { MongoClient, ServerApiVersion } = require('mongodb'); 
-const { Buffer } = require('buffer'); 
-const rateLimit = require('express-rate-limit'); 
+const { Pool } = require('pg'); // Driver Postgres
+const { MongoClient, ServerApiVersion } = require('mongodb'); // Driver MongoDB
+const { Buffer } = require('buffer'); // Para Autenticação Basic
+const rateLimit = require('express-rate-limit'); // Para Rate Limit
 
 require('dotenv').config();
 
-// --- CONFIGURAÇÕES (SendGrid, Postgres, MongoDB) ---
-// ... (toda a sua configuração de sgMail, pool, e mongoClient permanece a mesma) ...
+// --- CONFIGURAÇÃO DO SENDGRID ---
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
+// --- CONFIGURAÇÃO DO BANCO DE DADOS (POSTGRES) ---
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
-      rejectUnauthorized: false
+      rejectUnauthorized: false // Necessário para conexões com o Render
     }
 });
 
+// --- CONFIGURAÇÃO DO BANCO DE DADOS (MONGODB) ---
 const mongoUri = process.env.MONGO_URI;
 const mongoClient = new MongoClient(mongoUri, {
   serverApi: {
@@ -28,9 +29,9 @@ const mongoClient = new MongoClient(mongoUri, {
     deprecationErrors: true,
   }
 });
-let logDB; 
+let logDB; // Variável global para acessar o banco de logs
 
-// --- [NOVO] --- FUNÇÃO DE MASCARAMENTO (Item 3.c) ---
+// --- FUNÇÃO DE MASCARAMENTO (Item 3.c) ---
 /**
  * Mascara PII (CPF/CNPJ) em uma string de texto.
  * @param {string} text O texto para mascarar
@@ -59,38 +60,44 @@ function maskPII(text) {
 
     return maskedText;
 }
-// --- Fim da Função de Mascaramento ---
 
 
-// --- SISTEMA DE LOGS (salvarLog, logInfo, logError) ---
-// ... (função conectarMongo permanece a mesma) ...
+// --- SISTEMA DE LOGS ESTRUTURADOS (Item 3.a) ---
+
+/**
+ * Conecta ao MongoDB e prepara a coleção de logs
+ */
 async function conectarMongo() {
     try {
         await mongoClient.connect();
         await mongoClient.db("admin").command({ ping: 1 });
         console.log("Conexão com MongoDB Atlas estabelecida com sucesso!");
+        // Define o banco de dados e a coleção que vamos usar
         logDB = mongoClient.db("logs_sprint4").collection("denuncias_logs");
         logInfo("MongoDB", "Coletor de logs do MongoDB inicializado.");
     } catch (err) {
+        // Se não conseguir conectar ao Mongo, loga no console e continua
         console.error("ERRO CRÍTICO AO CONECTAR NO MONGODB:", err);
     }
 }
 
-// --- [ALTERADO] --- Função salvarLog agora mascara os dados ---
+/**
+ * Salva um log estruturado no MongoDB (Item 1.d)
+ * @param {string} level - Nível do log (INFO, ERROR, WARN)
+ * @param {string} component - Onde o log se originou (ex: Postgres, SendGrid, Webhook)
+ * @param {string} message - A mensagem de log
+ * @param {object} context - Dados adicionais (protocolo, intent, erro, etc.)
+ */
 async function salvarLog(level, component, message, context = {}) {
     // --- Mascaramento de PII para Logs (Item 3.c) ---
-    // Clona o contexto para não alterar o original
     const maskedContext = { ...context }; 
-    // Define quais chaves do contexto devem ser verificadas
     const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema']; 
 
     for (const key of sensitiveKeys) {
         if (maskedContext[key] && typeof maskedContext[key] === 'string') {
-            // Aplica o mascaramento no valor
             maskedContext[key] = maskPII(maskedContext[key]);
         }
     }
-    // A 'message' principal também pode conter PII
     const maskedMessage = maskPII(message);
     // --- Fim do Mascaramento ---
 
@@ -102,12 +109,14 @@ async function salvarLog(level, component, message, context = {}) {
         ...maskedContext // Usa o contexto mascarado
     };
 
+    // 1. Imprime no console (para o log do Render)
     if (level === 'ERROR') {
         console.error(JSON.stringify(logEntry, null, 2));
     } else {
         console.log(JSON.stringify(logEntry, null, 2));
     }
 
+    // 2. Tenta salvar no MongoDB
     if (logDB) {
         try {
             await logDB.insertOne(logEntry);
@@ -115,9 +124,11 @@ async function salvarLog(level, component, message, context = {}) {
             console.error("Falha ao salvar log no MongoDB:", err);
         }
     } else if (level === 'ERROR' && component !== 'MongoDB') {
+        // Se o logDB não iniciou E temos um erro, loga no console
         console.error("logDB não inicializado. Log de ERRO não salvo no MongoDB.");
     }
 }
+// Funções auxiliares para facilitar o logging
 const logInfo = (component, message, context) => salvarLog('INFO', component, message, context);
 const logError = (component, message, error, context) => {
     const errorDetails = {
@@ -126,16 +137,19 @@ const logError = (component, message, error, context) => {
         code: error.code,
         ...error
     };
-    // Note: O erro (stack trace) não é mascarado, o que é normal.
-    // O 'context' será mascarado dentro do 'salvarLog'.
     salvarLog('ERROR', component, message, { ...context, error: errorDetails });
 };
+// --- Fim do Sistema de Logs ---
 
-// --- FUNÇÕES DE BANCO (inicializarBanco, salvarNoBancoPostgres) ---
-// ... (suas funções de banco permanecem as mesmas) ...
+
+// --- FUNÇÕES DE BANCO (POSTGRES) ---
+/**
+ * Verifica o schema do banco Postgres e cria/altera colunas conforme necessário.
+ */
 async function inicializarBanco() {
     const client = await pool.connect(); 
     try {
+        // Passo 1: Garante que a tabela exista
         const createTableQuery = `
         CREATE TABLE IF NOT EXISTS denuncias (
             id SERIAL PRIMARY KEY,
@@ -150,12 +164,14 @@ async function inicializarBanco() {
         await client.query(createTableQuery);
         logInfo("Postgres", "Tabela 'denuncias' verificada/criada.");
 
+        // Objeto para verificar colunas dinamicamente
         const colunas = {
             'prioridade': `ALTER TABLE denuncias ADD COLUMN prioridade VARCHAR(50);`,
             'data_ocorrido': `ALTER TABLE denuncias ADD COLUMN data_ocorrido TIMESTAMP WITH TIME ZONE;`,
             'titulo': `ALTER TABLE denuncias ADD COLUMN titulo VARCHAR(255);`
         };
 
+        // Loop para verificar e adicionar cada coluna
         for (const [coluna, addQuery] of Object.entries(colunas)) {
             const checkQuery = `
             SELECT column_name FROM information_schema.columns 
@@ -171,6 +187,7 @@ async function inicializarBanco() {
             }
         }
 
+        // Verifica e AJUSTA a coluna 'status' (Remove DEFAULT)
         const checkStatusQuery = `
         SELECT column_default FROM information_schema.columns 
         WHERE table_name='denuncias' AND column_name='status';
@@ -183,16 +200,20 @@ async function inicializarBanco() {
         } else {
             logInfo("Postgres", "Coluna 'status' já está configurada corretamente (sem DEFAULT).");
         }
+
         logInfo("Postgres", "Banco de dados inicializado e schema atualizado.");
+
     } catch (err) {
         logError("Postgres", "Erro ao inicializar ou atualizar o schema", err);
     } finally {
         client.release(); 
     }
 }
+
+/**
+ * [ITEM 1.d] Salva o núcleo da denúncia no banco de dados Postgres.
+ */
 async function salvarNoBancoPostgres(dadosTicket) {
-    // IMPORTANTE: Esta função salva os dados REAIS (não mascarados)
-    // no Postgres, o que está correto para a operação.
     logInfo("Postgres", `Iniciando salvamento no Postgres. Status: ${dadosTicket.status}`, { protocolo: dadosTicket.protocolo });
     
     const query = `
@@ -222,8 +243,8 @@ async function salvarNoBancoPostgres(dadosTicket) {
 }
 
 
-// --- FUNÇÕES DE E-MAIL (gerarProtocolo, enviarTicketPorEmail, enviarNotificacaoAntifraude) ---
-// ... (suas funções de e-mail permanecem as mesmas) ...
+// --- FUNÇÕES DE E-MAIL (SENDGRID) ---
+
 function gerarProtocolo() {
     const data = new Date();
     const ano = data.getFullYear();
@@ -232,17 +253,21 @@ function gerarProtocolo() {
     const aleatorio = Math.floor(10000 + Math.random() * 90000);
     return `SUP-${ano}${mes}${dia}-${aleatorio}`;
 }
+
+/**
+ * [ITEM 1.a] Envia o ticket/denúncia por e-mail para o cliente e suporte.
+ */
 async function enviarTicketPorEmail(dadosTicket) {
-    // E-mails são enviados com dados REAIS, o que está correto.
-    // O mascaramento é apenas para os LOGS.
     logInfo("SendGrid", "Iniciando envio de e-mail de confirmação", { protocolo: dadosTicket.protocolo, email: dadosTicket.email });
     
     const msg = {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot de Suporte' },
-        to: ['ct.sprint4@gmail.com'], 
-        subject: `Novo Chamado: ${dadosTicket.protocolo} - ${dadosTicket.titulo}`, 
-        html: dadosTicket.descricao 
+        to: ['ct.sprint4@gmail.com'], // E-mail de suporte sempre
+        subject: `Novo Chamado: ${dadosTicket.protocolo} - ${dadosTicket.titulo}`, // Usa o novo título
+        html: dadosTicket.descricao // Usa a descrição padronizada
     };
+
+    // Adiciona o e-mail do cliente APENAS se ele for válido
     if (dadosTicket.email && dadosTicket.email.includes('@')) {
         msg.to.push(dadosTicket.email);
         logInfo("SendGrid", `Email do cliente ('${dadosTicket.email}') é válido. Adicionando à lista de destinatários.`, { protocolo: dadosTicket.protocolo });
@@ -259,6 +284,10 @@ async function enviarTicketPorEmail(dadosTicket) {
         return false;
     }
 }
+
+/**
+ * [ITEM 1.c] Envia notificação para a equipe antifraude.
+ */
 async function enviarNotificacaoAntifraude(dadosTicket) {
     logInfo("SendGrid", "Iniciando notificação para equipe antifraude (Alta Prioridade)", { protocolo: dadosTicket.protocolo });
     const emailEquipe = process.env.ANTIFRAUDE_EMAIL;
@@ -271,7 +300,7 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot Alerta de Risco' },
         to: emailEquipe,
         subject: `ALERTA (Revisão Pendente): Nova Denúncia de ALTA PRIORIDADE - Protocolo: ${dadosTicket.protocolo}`,
-        html: dadosTicket.descricao 
+        html: dadosTicket.descricao // Usa a descrição padronizada
     };
     try {
         await sgMail.send(msg);
@@ -284,29 +313,30 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
 }
 
 
-// --- CONFIGURAÇÃO DO SERVIDOR ---
+// --- CONFIGURAÇÃO DO SERVIDOR (EXPRESS) ---
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 // --- CONFIGURAÇÃO DE RATE LIMIT (Item 3.b) ---
 const limiter = rateLimit({
-	windowMs: 15 * 60 * 1000, 
-	max: 100, 
+	windowMs: 15 * 60 * 1000, // 15 minutos
+	max: 100, // Limita cada IP a 100 requisições por janela de 15 minutos
 	message: 'Muitas requisições deste IP. Por favor, tente novamente após 15 minutos.',
-    standardHeaders: true, 
-	legacyHeaders: false, 
+    standardHeaders: true, // Retorna informações do limite nos cabeçalhos `RateLimit-*`
+	legacyHeaders: false, // Desabilita os cabeçalhos `X-RateLimit-*`
     handler: (req, res, next, options) => {
+        // Loga a tentativa bloqueada
         logError("RateLimit", `Requisição bloqueada por excesso de tentativas (IP: ${req.ip}).`, new Error('Rate Limit Exceeded'), { ip: req.ip });
         res.status(options.statusCode).send(options.message);
     }
 });
-
+// Aplica o middleware de rate limit a TODAS as requisições
 app.use(limiter);
-// --- Fim do Rate Limit ---
-
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO (Item 3.b) ---
-// ... (sua função 'checkAuth' permanece a mesma) ...
+/**
+ * Verifica as credenciais de Autenticação Basic enviadas pelo Dialogflow.
+ */
 function checkAuth(req, res, next) {
     logInfo("Auth", "Verificando autenticação do webhook...");
     
@@ -332,7 +362,7 @@ function checkAuth(req, res, next) {
 
     if (user === expectedUser && pass === expectedPass) {
         logInfo("Auth", "Autenticação bem-sucedida.", { user });
-        next(); 
+        next(); // Continua para a rota principal
     } else {
         logError("Auth", "Falha de autenticação: Credenciais inválidas.", new Error('Invalid credentials'), { user });
         return res.status(401).json({ error: 'Não autorizado. Credenciais inválidas.' });
@@ -342,15 +372,14 @@ function checkAuth(req, res, next) {
 
 // --- ROTA PRINCIPAL DO WEBHOOK ---
 app.post('/webhook', checkAuth, async (req, res) => {
-    // ... (toda a lógica da rota permanece a mesma) ...
-    // A única diferença é que agora, quando 'logInfo' ou 'logError'
-    // são chamados, eles vão mascarar os dados antes de salvar no Mongo!
+    
     const intentName = req.body.queryResult.intent.displayName;
     const dialogflowSessionId = req.body.session.split('/').pop();
     let traceContext = { intentName, dialogflowSessionId };
 
     logInfo("Webhook", "Nova requisição recebida (pós-autenticação/rate-limit)", traceContext);
 
+    // --- ROTA: AbrirChamadoSuporte ---
     if (intentName === 'AbrirChamadoSuporte') {
         let protocolo; 
         try {
@@ -362,6 +391,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
             const prioridade = parameters.prioridade; 
             const dataOcorridoStr = parameters.data_ocorrido; 
 
+            // Lógica de busca de e-mail robusta
             let email = 'Não informado';
             if (parameters.email && parameters.email !== '') {
                 email = parameters.email;
@@ -400,15 +430,14 @@ app.post('/webhook', checkAuth, async (req, res) => {
             
             const dataOcorridoFormatada = dataOcorrido.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
+            // Item 2.a: Human-in-the-loop
             let statusInicial = 'Recebido'; 
             if (prioridade && prioridade.toLowerCase() === 'alta') {
                 statusInicial = 'Revisão Pendente'; 
             }
 
+            // Item 2.c: Título e Descrição Padronizada
             const tituloTicket = `Denúncia: ${descricaoProblema.substring(0, 40)}...`;
-
-            // Esta descrição padronizada contém os dados REAIS
-            // e é salva no Postgres (correto) e enviada por e-mail (correto).
             const descricaoPadronizada = `
             <h3>Resumo da Denúncia (Protocolo: ${protocolo})</h3>
             <ul>
@@ -440,11 +469,11 @@ app.post('/webhook', checkAuth, async (req, res) => {
             };
 
             if (statusInicial === 'Revisão Pendente') {
-                await enviarNotificacaoAntifraude(dadosTicket);
+                await enviarNotificacaoAntifraude(dadosTicket); // Item 1.c
             }
             
-            const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket);
-            const emailEnviado = await enviarTicketPorEmail(dadosTicket);
+            const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket); // Item 1.d
+            const emailEnviado = await enviarTicketPorEmail(dadosTicket); // Item 1.a
             
             // --- 5. Resposta Final ---
             if (emailEnviado && salvoNoBanco) {
@@ -461,6 +490,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
             return res.json({ fulfillmentMessages: [{ text: { text: [`Desculpe, ocorreu um erro interno. Nossa equipe já foi notificada. (${error.message})`] } }] });
         }
     
+    // --- ROTA: consultar-status ---
     } else if (intentName === 'consultar-status') {
         const protocolo = req.body.queryResult.parameters.protocolo;
         traceContext.protocolo = protocolo; 
@@ -470,6 +500,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
             return res.json({ fulfillmentMessages: [{ text: { text: ['Não entendi o número do protocolo. Poderia repetir?'] } }] });
         }
         try {
+            // Item 1.b: Consulta de status
             const query = 'SELECT status FROM denuncias WHERE protocolo = $1';
             const result = await pool.query(query, [protocolo]);
             let responseText = '';
@@ -486,7 +517,53 @@ app.post('/webhook', checkAuth, async (req, res) => {
             logError("Webhook", "Erro ao consultar o banco (consultar-status)", error, traceContext);
             return res.json({ fulfillmentMessages: [{ text: { text: ['Ocorreu um erro ao consultar o status. Tente novamente mais tarde.'] } }] });
         }
+
+    // --- ROTA: excluir-meus-dados (Item 3.c) ---
+    } else if (intentName === 'excluir-meus-dados') {
+        const protocolo = req.body.queryResult.parameters.protocolo;
+        traceContext.protocolo = protocolo; 
+
+        if (!protocolo || protocolo.trim() === '') {
+            logInfo("Webhook", "Tentativa de exclusão sem protocolo.", traceContext);
+            return res.json({ fulfillmentMessages: [{ text: { text: ['Não entendi o número do protocolo. Poderia repetir?'] } }] });
+        }
+        
+        logInfo("Webhook", `Iniciando processo de anonimização para o protocolo: ${protocolo}`, traceContext);
+
+        try {
+            const query = `
+                UPDATE denuncias 
+                SET 
+                    nome = '[ANONIMIZADO]',
+                    email = '[ANONIMIZADO]',
+                    descricao = '[CONTEÚDO ANONIMIZADO PELO USUÁRIO]',
+                    titulo = '[ANONIMIZADO]',
+                    status = 'Anonimizado'
+                WHERE protocolo = $1;
+            `;
+            
+            const result = await pool.query(query, [protocolo]);
+            let responseText = '';
+
+            // result.rowCount informa quantas linhas foram afetadas
+            if (result.rowCount > 0) {
+                responseText = `Processo concluído. Os dados pessoais associados ao protocolo ${protocolo} foram permanentemente anonimizados.`;
+                logInfo("Webhook", `Anonimização do protocolo ${protocolo} concluída com sucesso.`, traceContext);
+            } else {
+                responseText = `Não foi possível encontrar uma denúncia com o protocolo ${protocolo}. Nenhum dado foi alterado.`;
+                logInfo("Webhook", `Tentativa de anonimização falhou: protocolo ${protocolo} não encontrado.`, traceContext);
+            }
+            
+            return res.json({ fulfillmentMessages: [{ text: { text: [responseText] } }] });
+
+        } catch (error) {
+            logError("Webhook", "Erro ao anonimizar dados no banco (excluir-meus-dados)", error, traceContext);
+            return res.json({ fulfillmentMessages: [{ text: { text: ['Ocorreu um erro ao processar sua solicitação de anonimização. Tente novamente mais tarde.'] } }] });
+        }
+    // --- Fim da Rota de Exclusão ---
+
     } else {
+        // Rota para Intents não tratadas
         logInfo("Webhook", `Intent "${intentName}" não tratada por este webhook.`, traceContext);
         return res.json({ fulfillmentMessages: [{ text: { text: [`Intent "${intentName}" não tratada por este webhook.`] } }] });
     }
@@ -496,6 +573,8 @@ app.post('/webhook', checkAuth, async (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor do webhook rodando na porta ${PORT}`);
     
+    // Inicia as conexões com os bancos
     inicializarBanco(); // Postgres
     conectarMongo();    // MongoDB
 });
+
