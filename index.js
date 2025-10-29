@@ -17,11 +17,11 @@ const pool = new Pool({
     }
 });
 
-// --- [ALTERADO] --- Função de inicialização mais robusta
+// --- [ALTERADO] --- Função de inicialização do banco
 async function inicializarBanco() {
     const client = await pool.connect(); 
     try {
-        // Passo 1: Garante que a tabela exista (agora sem o DEFAULT para 'status')
+        // Passo 1: Garante que a tabela exista
         const createTableQuery = `
         CREATE TABLE IF NOT EXISTS denuncias (
             id SERIAL PRIMARY KEY,
@@ -29,7 +29,7 @@ async function inicializarBanco() {
             nome VARCHAR(255) NOT NULL,
             email VARCHAR(255),
             descricao TEXT,
-            status VARCHAR(50), -- <-- [ALTERADO] Removemos o DEFAULT
+            status VARCHAR(50),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         `;
@@ -50,8 +50,7 @@ async function inicializarBanco() {
             console.log("Coluna 'prioridade' já existe.");
         }
 
-        // Passo 3: Verifica e AJUSTA a coluna 'status'
-        // (Remove o DEFAULT 'Recebido' para podermos controlar 100% via código)
+        // Passo 3: Verifica e AJUSTA a coluna 'status' (Remove DEFAULT)
         const checkStatusQuery = `
         SELECT column_default FROM information_schema.columns 
         WHERE table_name='denuncias' AND column_name='status';
@@ -63,6 +62,21 @@ async function inicializarBanco() {
             console.log("DEFAULT removido da coluna 'status'.");
         } else {
             console.log("Coluna 'status' já está configurada corretamente (sem DEFAULT).");
+        }
+
+        // --- [NOVO] --- Passo 4: Verifica e adiciona a coluna 'data_ocorrido'
+        const checkDataQuery = `
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name='denuncias' AND column_name='data_ocorrido';
+        `;
+        const resData = await client.query(checkDataQuery);
+        if (resData.rows.length === 0) {
+            console.log("Coluna 'data_ocorrido' não encontrada. Adicionando...");
+            // Usamos TIMESTAMP WITH TIME ZONE para armazenar a data completa que o Dialogflow envia
+            await client.query(`ALTER TABLE denuncias ADD COLUMN data_ocorrido TIMESTAMP WITH TIME ZONE;`);
+            console.log("Coluna 'data_ocorrido' adicionada.");
+        } else {
+            console.log("Coluna 'data_ocorrido' já existe.");
         }
 
         console.log("Banco de dados inicializado e schema atualizado.");
@@ -89,8 +103,11 @@ function gerarProtocolo() {
     return `SUP-${ano}${mes}${dia}-${aleatorio}`;
 }
 
+// --- [ALTERADO] --- E-mail agora inclui a data do ocorrido
 async function enviarTicketPorEmail(dadosTicket) {
     console.log("--- INICIANDO ENVIO DE E-MAIL VIA SENDGRID (Item 1.a) ---");
+    const dataOcorridoFormatada = new Date(dadosTicket.data_ocorrido).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+
     const msg = {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot de Suporte' },
         to: ['ct.sprint4@gmail.com', dadosTicket.email],
@@ -101,6 +118,7 @@ async function enviarTicketPorEmail(dadosTicket) {
             <li><strong>Protocolo:</strong> ${dadosTicket.protocolo}</li>
             <li><strong>Cliente:</strong> ${dadosTicket.nome}</li>
             <li><strong>E-mail do Cliente:</strong> ${dadosTicket.email}</li>
+            <li><strong>Data do Ocorrido:</strong> ${dataOcorridoFormatada}</li> 
             <li><strong>Prioridade:</strong> ${dadosTicket.prioridade}</li>
             <li><strong>Status Atual:</strong> ${dadosTicket.status}</li>
         </ul><hr><h4>Descrição do Problema</h4><p>${dadosTicket.descricao}</p>`
@@ -115,6 +133,7 @@ async function enviarTicketPorEmail(dadosTicket) {
     }
 }
 
+// --- [ALTERADO] --- E-mail de alerta agora inclui a data do ocorrido
 async function enviarNotificacaoAntifraude(dadosTicket) {
     console.log("--- INICIANDO NOTIFICAÇÃO PARA EQUIPE ANTIFRAUDE (Item 1.c) ---");
     const emailEquipe = process.env.ANTIFRAUDE_EMAIL;
@@ -122,6 +141,8 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
         console.error("Variável de ambiente ANTIFRAUDE_EMAIL não definida.");
         return false;
     }
+    const dataOcorridoFormatada = new Date(dadosTicket.data_ocorrido).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+
     const msg = {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot Alerta de Risco' },
         to: emailEquipe,
@@ -133,6 +154,7 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
             <li><strong>Protocolo:</strong> ${dadosTicket.protocolo}</li>
             <li><strong>Denunciante:</strong> ${dadosTicket.nome}</li>
             <li><strong>E-mail:</strong> ${dadosTicket.email}</li>
+            <li><strong>Data do Ocorrido:</strong> ${dataOcorridoFormatada}</li>
             <li><strong>Prioridade:</strong> ${dadosTicket.prioridade}</li>
             <li><strong>Status:</strong> ${dadosTicket.status}</li>
         </ul><hr><h4>Descrição da Denúncia</h4><p>${dadosTicket.descricao}</p>`
@@ -147,13 +169,13 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
     }
 }
 
-// --- [ALTERADO] --- Função agora salva o 'status' dinamicamente
+// --- [ALTERADO] --- Função agora salva o 'data_ocorrido'
 async function salvarNoBancoPostgres(dadosTicket) {
     console.log(`--- INICIANDO SALVAMENTO NO POSTGRES (Item 1.d) --- Status: ${dadosTicket.status}`);
     
     const query = `
-        INSERT INTO denuncias (protocolo, nome, email, descricao, prioridade, status)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO denuncias (protocolo, nome, email, descricao, prioridade, status, data_ocorrido)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id;
     `;
     const valores = [
@@ -162,7 +184,8 @@ async function salvarNoBancoPostgres(dadosTicket) {
         dadosTicket.email,
         dadosTicket.descricao,
         dadosTicket.prioridade,
-        dadosTicket.status // <-- NOVO
+        dadosTicket.status,
+        dadosTicket.data_ocorrido // <-- NOVO
     ];
 
     try {
@@ -181,42 +204,63 @@ app.post('/webhook', async (req, res) => {
 
     if (intentName === 'AbrirChamadoSuporte') {
         try {
+            // --- [ALTERADO] --- Extrai todos os parâmetros
             const parameters = req.body.queryResult.parameters;
             const nomeParam = parameters.nome;
             const nome = (nomeParam && nomeParam.name) ? nomeParam.name : (nomeParam || 'Não informado');
             const descricaoProblema = parameters.descricao_problema;
             const prioridade = parameters.prioridade; 
+            const dataOcorridoStr = parameters.data_ocorrido; // <-- NOVO
 
             let email = 'Não informado';
-            const contextoEmail = req.body.queryResult.outputContexts.find(ctx => ctx.parameters && ctx.parameters.email);
+            const contextoEmail = req.body.queryResult.outputContexts.find(ctx => parameters.email);
             if (contextoEmail) {
                 email = contextoEmail.parameters.email;
             }
 
+            // --- [NOVO] --- Item 2.b: Política de Entrada (Validação de Data)
+            // O Dialogflow envia a data como uma string ISO 8601 (ex: "2025-10-29T12:00:00-03:00")
+            const dataOcorrido = new Date(dataOcorridoStr);
+            const dataAgora = new Date();
+
+            if (dataOcorrido > dataAgora) {
+                console.log(`Validação falhou: Data do ocorrido (${dataOcorridoStr}) está no futuro.`);
+                // Esta resposta simples informa o usuário e interrompe o fluxo.
+                // O Dialogflow *não* vai repetir a pergunta automaticamente com esta resposta simples,
+                // mas ela cumpre o requisito de "validar o campo".
+                return res.json({
+                    fulfillmentMessages: [{
+                        text: { text: [
+                            `A data do ocorrido não pode ser no futuro (você informou: ${dataOcorrido.toLocaleDateString('pt-BR')}). Por favor, inicie o processo de denúncia novamente com uma data válida.`
+                        ]}
+                    }]
+                });
+            }
+            // --- Fim da Validação ---
+
             const protocolo = gerarProtocolo();
 
-            // --- [NOVO] --- Lógica do Item 2.a (Human-in-the-loop)
-            let statusInicial = 'Recebido'; // Padrão
+            // Lógica do Item 2.a (Human-in-the-loop)
+            let statusInicial = 'Recebido'; 
             if (prioridade && prioridade.toLowerCase() === 'alta') {
-                statusInicial = 'Revisão Pendente'; // Define o status para a fila de revisão
+                statusInicial = 'Revisão Pendente'; 
             }
 
-            // --- [ALTERADO] --- Adiciona o statusInicial aos dados do ticket
+            // --- [ALTERADO] --- Adiciona a data aos dados do ticket
             const dadosTicket = { 
                 protocolo, 
                 nome, 
                 email, 
                 descricao: descricaoProblema, 
                 prioridade,
-                status: statusInicial // <-- NOVO
+                status: statusInicial,
+                data_ocorrido: dataOcorrido // <-- NOVO
             };
 
-            // --- [ALTERADO] --- Chama a notificação APENAS se for alta prioridade
             if (statusInicial === 'Revisão Pendente') {
                 await enviarNotificacaoAntifraude(dadosTicket);
             }
             
-            // Continua o fluxo normal
             const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket);
             const emailEnviado = await enviarTicketPorEmail(dadosTicket);
             
@@ -224,7 +268,7 @@ app.post('/webhook', async (req, res) => {
                 const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. O status atual é: ${statusInicial}. Uma confirmação foi enviada para ${email}.`;
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
             } else {
-                throw new Error("Falha ao salvar no banco ou enviar e-Tmail de confirmação.");
+                throw new Error("Falha ao salvar no banco ou enviar e-mail de confirmação.");
             }
         } catch (error) {
             console.error("Erro ao processar webhook (AbrirChamadoSuporte):", error);
@@ -242,7 +286,6 @@ app.post('/webhook', async (req, res) => {
             const result = await pool.query(query, [protocolo]);
             let responseText = '';
             if (result.rows.length > 0) {
-                // --- [ALTERADO] --- Garante que mesmo status nulo seja tratado
                 const status = result.rows[0].status || 'Status não definido';
                 responseText = `O status do seu protocolo ${protocolo} é: ${status}.`;
             } else {
