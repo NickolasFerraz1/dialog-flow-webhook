@@ -17,7 +17,7 @@ const pool = new Pool({
     }
 });
 
-// --- [ALTERADO] --- Função de inicialização do banco
+// --- Função de inicialização do banco ---
 async function inicializarBanco() {
     const client = await pool.connect(); 
     try {
@@ -64,7 +64,7 @@ async function inicializarBanco() {
             console.log("Coluna 'status' já está configurada corretamente (sem DEFAULT).");
         }
 
-        // --- [NOVO] --- Passo 4: Verifica e adiciona a coluna 'data_ocorrido'
+        // Passo 4: Verifica e adiciona a coluna 'data_ocorrido'
         const checkDataQuery = `
         SELECT column_name FROM information_schema.columns 
         WHERE table_name='denuncias' AND column_name='data_ocorrido';
@@ -72,7 +72,6 @@ async function inicializarBanco() {
         const resData = await client.query(checkDataQuery);
         if (resData.rows.length === 0) {
             console.log("Coluna 'data_ocorrido' não encontrada. Adicionando...");
-            // Usamos TIMESTAMP WITH TIME ZONE para armazenar a data completa que o Dialogflow envia
             await client.query(`ALTER TABLE denuncias ADD COLUMN data_ocorrido TIMESTAMP WITH TIME ZONE;`);
             console.log("Coluna 'data_ocorrido' adicionada.");
         } else {
@@ -92,7 +91,7 @@ async function inicializarBanco() {
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
-// --- FUNÇÕES AUXILIARES DA SPRINT 4 ---
+// --- FUNÇÕES AUXILIARES ---
 
 function gerarProtocolo() {
     const data = new Date();
@@ -103,7 +102,6 @@ function gerarProtocolo() {
     return `SUP-${ano}${mes}${dia}-${aleatorio}`;
 }
 
-// --- [ALTERADO] --- E-mail agora inclui a data do ocorrido
 async function enviarTicketPorEmail(dadosTicket) {
     console.log("--- INICIANDO ENVIO DE E-MAIL VIA SENDGRID (Item 1.a) ---");
     const dataOcorridoFormatada = new Date(dadosTicket.data_ocorrido).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
@@ -133,7 +131,6 @@ async function enviarTicketPorEmail(dadosTicket) {
     }
 }
 
-// --- [ALTERADO] --- E-mail de alerta agora inclui a data do ocorrido
 async function enviarNotificacaoAntifraude(dadosTicket) {
     console.log("--- INICIANDO NOTIFICAÇÃO PARA EQUIPE ANTIFRAUDE (Item 1.c) ---");
     const emailEquipe = process.env.ANTIFRAUDE_EMAIL;
@@ -169,7 +166,6 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
     }
 }
 
-// --- [ALTERADO] --- Função agora salva o 'data_ocorrido'
 async function salvarNoBancoPostgres(dadosTicket) {
     console.log(`--- INICIANDO SALVAMENTO NO POSTGRES (Item 1.d) --- Status: ${dadosTicket.status}`);
     
@@ -185,7 +181,7 @@ async function salvarNoBancoPostgres(dadosTicket) {
         dadosTicket.descricao,
         dadosTicket.prioridade,
         dadosTicket.status,
-        dadosTicket.data_ocorrido // <-- NOVO
+        dadosTicket.data_ocorrido
     ];
 
     try {
@@ -204,30 +200,40 @@ app.post('/webhook', async (req, res) => {
 
     if (intentName === 'AbrirChamadoSuporte') {
         try {
-            // --- [ALTERADO] --- Extrai todos os parâmetros
             const parameters = req.body.queryResult.parameters;
             const nomeParam = parameters.nome;
             const nome = (nomeParam && nomeParam.name) ? nomeParam.name : (nomeParam || 'Não informado');
             const descricaoProblema = parameters.descricao_problema;
             const prioridade = parameters.prioridade; 
-            const dataOcorridoStr = parameters.data_ocorrido; // <-- NOVO
+            const dataOcorridoStr = parameters.data_ocorrido; 
 
             let email = 'Não informado';
-            const contextoEmail = req.body.queryResult.outputContexts.find(ctx => parameters.email);
+            // --- [CORREÇÃO] --- Buscando o e-mail do contexto corretamente
+            const contextoEmail = req.body.queryResult.outputContexts.find(ctx => ctx.name.endsWith('/parameters/email'));
             if (contextoEmail) {
                 email = contextoEmail.parameters.email;
+            } else {
+                // Tenta pegar do parâmetro, caso o contexto falhe (backup)
+                if (parameters.email) email = parameters.email;
             }
+            // --- Fim da Correção ---
 
-            // --- [NOVO] --- Item 2.b: Política de Entrada (Validação de Data)
-            // O Dialogflow envia a data como uma string ISO 8601 (ex: "2025-10-29T12:00:00-03:00")
+            // --- [ALTERADO] --- Item 2.b: Lógica de Validação de Data Corrigida
             const dataOcorrido = new Date(dataOcorridoStr);
             const dataAgora = new Date();
 
-            if (dataOcorrido > dataAgora) {
+            // Zeramos a hora, minutos e segundos de AMBAS as datas para comparar
+            // apenas o DIA, não a HORA.
+            const dataOcorridoZerada = new Date(dataOcorrido).setHours(0, 0, 0, 0);
+            const dataAgoraZerada = new Date(dataAgora).setHours(0, 0, 0, 0);
+
+            // Agora, "hoje" (meio-dia) > "agora" (10h) se torna
+            // "hoje" (meia-noite) > "hoje" (meia-noite) -> false (Correto)
+            // E "amanhã" (meio-dia) > "agora" (10h) se torna
+            // "amanhã" (meia-noite) > "hoje" (meia-noite) -> true (Correto)
+
+            if (dataOcorridoZerada > dataAgoraZerada) {
                 console.log(`Validação falhou: Data do ocorrido (${dataOcorridoStr}) está no futuro.`);
-                // Esta resposta simples informa o usuário e interrompe o fluxo.
-                // O Dialogflow *não* vai repetir a pergunta automaticamente com esta resposta simples,
-                // mas ela cumpre o requisito de "validar o campo".
                 return res.json({
                     fulfillmentMessages: [{
                         text: { text: [
@@ -240,13 +246,11 @@ app.post('/webhook', async (req, res) => {
 
             const protocolo = gerarProtocolo();
 
-            // Lógica do Item 2.a (Human-in-the-loop)
             let statusInicial = 'Recebido'; 
             if (prioridade && prioridade.toLowerCase() === 'alta') {
                 statusInicial = 'Revisão Pendente'; 
             }
 
-            // --- [ALTERADO] --- Adiciona a data aos dados do ticket
             const dadosTicket = { 
                 protocolo, 
                 nome, 
@@ -254,7 +258,7 @@ app.post('/webhook', async (req, res) => {
                 descricao: descricaoProblema, 
                 prioridade,
                 status: statusInicial,
-                data_ocorrido: dataOcorrido // <-- NOVO
+                data_ocorrido: dataOcorrido 
             };
 
             if (statusInicial === 'Revisão Pendente') {
@@ -276,7 +280,6 @@ app.post('/webhook', async (req, res) => {
         }
     
     } else if (intentName === 'consultar-status') {
-        // ... (código da consulta de status permanece o mesmo)
         const protocolo = req.body.queryResult.parameters.protocolo;
         if (!protocolo || protocolo.trim() === '') {
             return res.json({ fulfillmentMessages: [{ text: { text: ['Não entendi o número do protocolo. Poderia repetir?'] } }] });
