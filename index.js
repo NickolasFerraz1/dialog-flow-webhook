@@ -5,7 +5,7 @@ const sgMail = require('@sendgrid/mail');
 const { Pool } = require('pg'); 
 const { MongoClient, ServerApiVersion } = require('mongodb'); 
 const { Buffer } = require('buffer'); 
-const rateLimit = require('express-rate-limit'); // --- [NOVO] --- Importa o Rate Limiter
+const rateLimit = require('express-rate-limit'); 
 
 require('dotenv').config();
 
@@ -30,8 +30,40 @@ const mongoClient = new MongoClient(mongoUri, {
 });
 let logDB; 
 
+// --- [NOVO] --- FUNÇÃO DE MASCARAMENTO (Item 3.c) ---
+/**
+ * Mascara PII (CPF/CNPJ) em uma string de texto.
+ * @param {string} text O texto para mascarar
+ * @returns {string} O texto com PII mascarado
+ */
+function maskPII(text) {
+    if (typeof text !== 'string' || !text) {
+        return text;
+    }
+    
+    let maskedText = text;
+
+    // Regex para CPF (XXX.XXX.XXX-XX ou XXXXXXXXXXX)
+    // Substitui por XXX.***.***-XX
+    maskedText = maskedText.replace(
+        /(\d{3})[\.]?(\d{3})[\.]?(\d{3})[-]?(\d{2})/g, 
+        (match, p1, p2, p3, p4) => `${p1}.***.***-${p4}`
+    );
+
+    // Regex para CNPJ (XX.XXX.XXX/XXXX-XX ou XXXXXXXXXXXXXX)
+    // Substitui por XX.***.***/XXXX-XX
+    maskedText = maskedText.replace(
+        /(\d{2})[\.]?(\d{3})[\.]?(\d{3})[\/]?(\d{4})[-]?(\d{2})/g,
+        (match, p1, p2, p3, p4, p5) => `${p1}.***.***/${p4}-${p5}`
+    );
+
+    return maskedText;
+}
+// --- Fim da Função de Mascaramento ---
+
+
 // --- SISTEMA DE LOGS (salvarLog, logInfo, logError) ---
-// ... (todas as suas funções de log permanecem as mesmas) ...
+// ... (função conectarMongo permanece a mesma) ...
 async function conectarMongo() {
     try {
         await mongoClient.connect();
@@ -43,13 +75,31 @@ async function conectarMongo() {
         console.error("ERRO CRÍTICO AO CONECTAR NO MONGODB:", err);
     }
 }
+
+// --- [ALTERADO] --- Função salvarLog agora mascara os dados ---
 async function salvarLog(level, component, message, context = {}) {
+    // --- Mascaramento de PII para Logs (Item 3.c) ---
+    // Clona o contexto para não alterar o original
+    const maskedContext = { ...context }; 
+    // Define quais chaves do contexto devem ser verificadas
+    const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema']; 
+
+    for (const key of sensitiveKeys) {
+        if (maskedContext[key] && typeof maskedContext[key] === 'string') {
+            // Aplica o mascaramento no valor
+            maskedContext[key] = maskPII(maskedContext[key]);
+        }
+    }
+    // A 'message' principal também pode conter PII
+    const maskedMessage = maskPII(message);
+    // --- Fim do Mascaramento ---
+
     const logEntry = {
         timestamp: new Date(),
         level,
         component,
-        message,
-        ...context 
+        message: maskedMessage, // Usa a mensagem mascarada
+        ...maskedContext // Usa o contexto mascarado
     };
 
     if (level === 'ERROR') {
@@ -76,6 +126,8 @@ const logError = (component, message, error, context) => {
         code: error.code,
         ...error
     };
+    // Note: O erro (stack trace) não é mascarado, o que é normal.
+    // O 'context' será mascarado dentro do 'salvarLog'.
     salvarLog('ERROR', component, message, { ...context, error: errorDetails });
 };
 
@@ -139,6 +191,8 @@ async function inicializarBanco() {
     }
 }
 async function salvarNoBancoPostgres(dadosTicket) {
+    // IMPORTANTE: Esta função salva os dados REAIS (não mascarados)
+    // no Postgres, o que está correto para a operação.
     logInfo("Postgres", `Iniciando salvamento no Postgres. Status: ${dadosTicket.status}`, { protocolo: dadosTicket.protocolo });
     
     const query = `
@@ -179,6 +233,8 @@ function gerarProtocolo() {
     return `SUP-${ano}${mes}${dia}-${aleatorio}`;
 }
 async function enviarTicketPorEmail(dadosTicket) {
+    // E-mails são enviados com dados REAIS, o que está correto.
+    // O mascaramento é apenas para os LOGS.
     logInfo("SendGrid", "Iniciando envio de e-mail de confirmação", { protocolo: dadosTicket.protocolo, email: dadosTicket.email });
     
     const msg = {
@@ -232,21 +288,19 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
-// --- [NOVO] --- CONFIGURAÇÃO DE RATE LIMIT (Item 3.b) ---
+// --- CONFIGURAÇÃO DE RATE LIMIT (Item 3.b) ---
 const limiter = rateLimit({
-	windowMs: 15 * 60 * 1000, // 15 minutos
-	max: 100, // Limita cada IP a 100 requisições por janela de 15 minutos
+	windowMs: 15 * 60 * 1000, 
+	max: 100, 
 	message: 'Muitas requisições deste IP. Por favor, tente novamente após 15 minutos.',
-    standardHeaders: true, // Retorna informações do limite nos cabeçalhos `RateLimit-*`
-	legacyHeaders: false, // Desabilita os cabeçalhos `X-RateLimit-*`
+    standardHeaders: true, 
+	legacyHeaders: false, 
     handler: (req, res, next, options) => {
-        // Loga a tentativa bloqueada
         logError("RateLimit", `Requisição bloqueada por excesso de tentativas (IP: ${req.ip}).`, new Error('Rate Limit Exceeded'), { ip: req.ip });
         res.status(options.statusCode).send(options.message);
     }
 });
 
-// Aplica o middleware de rate limit a TODAS as requisições
 app.use(limiter);
 // --- Fim do Rate Limit ---
 
@@ -288,8 +342,9 @@ function checkAuth(req, res, next) {
 
 // --- ROTA PRINCIPAL DO WEBHOOK ---
 app.post('/webhook', checkAuth, async (req, res) => {
-    // ... (TODA A LÓGICA DA SUA ROTA /webhook permanece exatamente a mesma) ...
-    // ... (Ela só será executada se passar pelo 'limiter' E pelo 'checkAuth') ...
+    // ... (toda a lógica da rota permanece a mesma) ...
+    // A única diferença é que agora, quando 'logInfo' ou 'logError'
+    // são chamados, eles vão mascarar os dados antes de salvar no Mongo!
     const intentName = req.body.queryResult.intent.displayName;
     const dialogflowSessionId = req.body.session.split('/').pop();
     let traceContext = { intentName, dialogflowSessionId };
@@ -318,7 +373,9 @@ app.post('/webhook', checkAuth, async (req, res) => {
                     }
                 }
             }
+            // Adiciona PII ao contexto de log (será mascarado pelo salvarLog)
             traceContext.email = email; 
+            traceContext.nome = nome;
 
             // --- 2. Validação de Data (Item 2.b) ---
             const dataOcorrido = new Date(dataOcorridoStr);
@@ -350,6 +407,8 @@ app.post('/webhook', checkAuth, async (req, res) => {
 
             const tituloTicket = `Denúncia: ${descricaoProblema.substring(0, 40)}...`;
 
+            // Esta descrição padronizada contém os dados REAIS
+            // e é salva no Postgres (correto) e enviada por e-mail (correto).
             const descricaoPadronizada = `
             <h3>Resumo da Denúncia (Protocolo: ${protocolo})</h3>
             <ul>
@@ -364,6 +423,8 @@ app.post('/webhook', checkAuth, async (req, res) => {
             <p>${descricaoProblema}</p>
             `;
             
+            // Adiciona a descrição ao contexto de log (será mascarada)
+            traceContext.descricao_problema = descricaoProblema;
             logInfo("Webhook", "Auto-resumo e lógica de negócio concluídos", traceContext);
 
             // --- 4. Preparando Dados e Executando Ações ---
@@ -388,6 +449,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
             // --- 5. Resposta Final ---
             if (emailEnviado && salvoNoBanco) {
                 const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. O status atual é: ${statusInicial}. Uma confirmação foi enviada para ${email}.`;
+                // Este log final também terá o nome/email mascarados no Mongo
                 logInfo("Webhook", "Fluxo 'AbrirChamadoSuporte' concluído com sucesso.", traceContext);
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
             } else {
@@ -437,4 +499,3 @@ app.listen(PORT, () => {
     inicializarBanco(); // Postgres
     conectarMongo();    // MongoDB
 });
-
