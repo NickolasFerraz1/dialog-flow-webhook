@@ -2,7 +2,8 @@
 const express = require('express');
 const app = express();
 const sgMail = require('@sendgrid/mail');
-const { Pool } = require('pg');
+const { Pool } = require('pg'); // Driver Postgres
+const { MongoClient, ServerApiVersion } = require('mongodb'); // --- [NOVO] --- Driver MongoDB
 
 require('dotenv').config();
 
@@ -17,7 +18,89 @@ const pool = new Pool({
     }
 });
 
-// --- Função de inicialização do banco ---
+// --- [NOVO] --- CONFIGURAÇÃO DO BANCO DE DADOS (MONGODB) ---
+const mongoUri = process.env.MONGO_URI;
+const mongoClient = new MongoClient(mongoUri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  }
+});
+let logDB; // Variável global para acessar o banco de logs
+
+/**
+ * [NOVO] Conecta ao MongoDB e prepara a coleção de logs
+ */
+async function conectarMongo() {
+    try {
+        await mongoClient.connect();
+        await mongoClient.db("admin").command({ ping: 1 });
+        // O logInfo só funciona depois que o logDB é definido, então o primeiro log é no console
+        console.log("Conexão com MongoDB Atlas estabelecida com sucesso!");
+        // Define o banco de dados e a coleção que vamos usar
+        logDB = mongoClient.db("logs_sprint4").collection("denuncias_logs");
+        logInfo("MongoDB", "Coletor de logs do MongoDB inicializado.");
+    } catch (err) {
+        // Se não conseguir conectar ao Mongo, loga no console e continua
+        console.error("ERRO CRÍTICO AO CONECTAR NO MONGODB:", err);
+    }
+}
+// --- Fim da Configuração do MongoDB ---
+
+// --- [NOVO] --- SISTEMA DE LOGS ESTRUTURADOS (Item 3.a) ---
+/**
+ * Salva um log estruturado no MongoDB (Item 1.d)
+ * @param {string} level - Nível do log (INFO, ERROR, WARN)
+ * @param {string} component - Onde o log se originou (ex: Postgres, SendGrid, Webhook)
+ * @param {string} message - A mensagem de log
+ * @param {object} context - Dados adicionais (protocolo, intent, erro, etc.)
+ */
+async function salvarLog(level, component, message, context = {}) {
+    const logEntry = {
+        timestamp: new Date(),
+        level,
+        component,
+        message,
+        ...context // Adiciona protocolo, intentName, etc.
+    };
+
+    // 1. Imprime no console (para o log do Render)
+    if (level === 'ERROR') {
+        console.error(JSON.stringify(logEntry, null, 2));
+    } else {
+        console.log(JSON.stringify(logEntry, null, 2));
+    }
+
+    // 2. Tenta salvar no MongoDB
+    if (logDB) {
+        try {
+            await logDB.insertOne(logEntry);
+        } catch (err) {
+            // Se falhar ao salvar no Mongo, loga o erro no console
+            console.error("Falha ao salvar log no MongoDB:", err);
+        }
+    } else if (level === 'ERROR' && component !== 'MongoDB') {
+        // Se o logDB ainda não estiver pronto e o erro NÃO for do próprio Mongo
+        console.error("logDB não inicializado. Log de ERRO não salvo no MongoDB.");
+    }
+}
+// Funções auxiliares para facilitar o logging
+const logInfo = (component, message, context) => salvarLog('INFO', component, message, context);
+const logError = (component, message, error, context) => {
+    // Garante que o objeto de erro seja "logável"
+    const errorDetails = {
+        message: error.message,
+        stack: error.stack,
+        code: error.code,
+        ...error
+    };
+    salvarLog('ERROR', component, message, { ...context, error: errorDetails });
+};
+// --- Fim do Sistema de Logs ---
+
+
+// --- Função de inicialização do banco Postgres ---
 async function inicializarBanco() {
     const client = await pool.connect(); 
     try {
@@ -34,54 +117,48 @@ async function inicializarBanco() {
         );
         `;
         await client.query(createTableQuery);
-        console.log("Tabela 'denuncias' verificada/criada.");
+        logInfo("Postgres", "Tabela 'denuncias' verificada/criada.");
 
-        // Passo 2: Verifica e adiciona a coluna 'prioridade'
-        const checkPrioridadeQuery = `
-        SELECT column_name FROM information_schema.columns 
-        WHERE table_name='denuncias' AND column_name='prioridade';
-        `;
-        const resPrioridade = await client.query(checkPrioridadeQuery);
-        if (resPrioridade.rows.length === 0) {
-            console.log("Coluna 'prioridade' não encontrada. Adicionando...");
-            await client.query(`ALTER TABLE denuncias ADD COLUMN prioridade VARCHAR(50);`);
-            console.log("Coluna 'prioridade' adicionada.");
-        } else {
-            console.log("Coluna 'prioridade' já existe.");
+        // Objeto para verificar colunas
+        const colunas = {
+            'prioridade': `ALTER TABLE denuncias ADD COLUMN prioridade VARCHAR(50);`,
+            'data_ocorrido': `ALTER TABLE denuncias ADD COLUMN data_ocorrido TIMESTAMP WITH TIME ZONE;`,
+            'titulo': `ALTER TABLE denuncias ADD COLUMN titulo VARCHAR(255);`
+        };
+
+        for (const [coluna, addQuery] of Object.entries(colunas)) {
+            const checkQuery = `
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name='denuncias' AND column_name='${coluna}';
+            `;
+            const res = await client.query(checkQuery);
+            if (res.rows.length === 0) {
+                logInfo("Postgres", `Coluna '${coluna}' não encontrada. Adicionando...`);
+                await client.query(addQuery);
+                logInfo("Postgres", `Coluna '${coluna}' adicionada.`);
+            } else {
+                logInfo("Postgres", `Coluna '${coluna}' já existe.`);
+            }
         }
 
-        // Passo 3: Verifica e AJUSTA a coluna 'status' (Remove DEFAULT)
+        // Verifica e AJUSTA a coluna 'status' (Remove DEFAULT)
         const checkStatusQuery = `
         SELECT column_default FROM information_schema.columns 
         WHERE table_name='denuncias' AND column_name='status';
         `;
         const resStatus = await client.query(checkStatusQuery);
         if (resStatus.rows.length > 0 && resStatus.rows[0].column_default != null) {
-            console.log("Coluna 'status' possui um valor DEFAULT. Removendo...");
+            logInfo("Postgres", "Coluna 'status' possui um valor DEFAULT. Removendo...");
             await client.query(`ALTER TABLE denuncias ALTER COLUMN status DROP DEFAULT;`);
-            console.log("DEFAULT removido da coluna 'status'.");
+            logInfo("Postgres", "DEFAULT removido da coluna 'status'.");
         } else {
-            console.log("Coluna 'status' já está configurada corretamente (sem DEFAULT).");
+            logInfo("Postgres", "Coluna 'status' já está configurada corretamente (sem DEFAULT).");
         }
 
-        // Passo 4: Verifica e adiciona a coluna 'data_ocorrido'
-        const checkDataQuery = `
-        SELECT column_name FROM information_schema.columns 
-        WHERE table_name='denuncias' AND column_name='data_ocorrido';
-        `;
-        const resData = await client.query(checkDataQuery);
-        if (resData.rows.length === 0) {
-            console.log("Coluna 'data_ocorrido' não encontrada. Adicionando...");
-            await client.query(`ALTER TABLE denuncias ADD COLUMN data_ocorrido TIMESTAMP WITH TIME ZONE;`);
-            console.log("Coluna 'data_ocorrido' adicionada.");
-        } else {
-            console.log("Coluna 'data_ocorrido' já existe.");
-        }
-
-        console.log("Banco de dados inicializado e schema atualizado.");
+        logInfo("Postgres", "Banco de dados inicializado e schema atualizado.");
 
     } catch (err) {
-        console.error("Erro ao inicializar ou atualizar o schema:", err);
+        logError("Postgres", "Erro ao inicializar ou atualizar o schema", err);
     } finally {
         client.release(); 
     }
@@ -103,10 +180,8 @@ function gerarProtocolo() {
 }
 
 async function enviarTicketPorEmail(dadosTicket) {
-    console.log("--- INICIANDO ENVIO DE E-MAIL VIA SENDGRID (Item 1.a) ---");
+    logInfo("SendGrid", "Iniciando envio de e-mail de confirmação", { protocolo: dadosTicket.protocolo, email: dadosTicket.email });
     
-    // --- [ALTERADO] --- O HTML do e-mail agora usa a 'descricaoPadronizada'
-    // que já vem formatada dentro de dadosTicket.descricao
     const msg = {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot de Suporte' },
         to: ['ct.sprint4@gmail.com'], // E-mail de suporte sempre
@@ -117,30 +192,29 @@ async function enviarTicketPorEmail(dadosTicket) {
     // Adiciona o e-mail do cliente APENAS se ele for válido
     if (dadosTicket.email && dadosTicket.email.includes('@')) {
         msg.to.push(dadosTicket.email);
-        console.log(`Email do cliente ('${dadosTicket.email}') é válido. Adicionando à lista de destinatários.`);
+        logInfo("SendGrid", `Email do cliente ('${dadosTicket.email}') é válido. Adicionando à lista de destinatários.`, { protocolo: dadosTicket.protocolo });
     } else {
-        console.warn(`Email do cliente ('${dadosTicket.email}') é inválido ou não informado. Envio será feito apenas para o suporte.`);
+        logInfo("SendGrid", `Email do cliente ('${dadosTicket.email}') é inválido ou não informado. Envio será feito apenas para o suporte.`, { protocolo: dadosTicket.protocolo });
     }
 
     try {
         await sgMail.send(msg);
-        console.log("E-mail de confirmação enviado com sucesso!");
+        logInfo("SendGrid", "E-mail de confirmação enviado com sucesso!", { protocolo: dadosTicket.protocolo });
         return true;
     } catch (error) {
-        console.error("Erro ao enviar e-mail de confirmação:", error?.response?.body || error);
+        logError("SendGrid", "Erro ao enviar e-mail de confirmação", error, { protocolo: dadosTicket.protocolo });
         return false;
     }
 }
 
 async function enviarNotificacaoAntifraude(dadosTicket) {
-    console.log("--- INICIANDO NOTIFICAÇÃO PARA EQUIPE ANTIFRAUDE (Item 1.c) ---");
+    logInfo("SendGrid", "Iniciando notificação para equipe antifraude (Alta Prioridade)", { protocolo: dadosTicket.protocolo });
     const emailEquipe = process.env.ANTIFRAUDE_EMAIL;
     if (!emailEquipe) {
-        console.error("Variável de ambiente ANTIFRAUDE_EMAIL não definida.");
+        logError("SendGrid", "Variável de ambiente ANTIFRAUDE_EMAIL não definida. Notificação não enviada.", new Error("ANTIFRAUDE_EMAIL is not set"), { protocolo: dadosTicket.protocolo });
         return false;
     }
    
-    // --- [ALTERADO] --- O HTML do e-mail de alerta também usa a 'descricaoPadronizada'
     const msg = {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot Alerta de Risco' },
         to: emailEquipe,
@@ -149,18 +223,17 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
     };
     try {
         await sgMail.send(msg);
-        console.log(`Notificação de alta prioridade enviada para ${emailEquipe}!`);
+        logInfo("SendGrid", `Notificação de alta prioridade enviada para ${emailEquipe}!`, { protocolo: dadosTicket.protocolo });
         return true;
     } catch (error) {
-        console.error("Erro ao enviar notificação de alta prioridade:", error?.response?.body || error);
+        logError("SendGrid", "Erro ao enviar notificação de alta prioridade", error, { protocolo: dadosTicket.protocolo });
         return false;
     }
 }
 
 async function salvarNoBancoPostgres(dadosTicket) {
-    console.log(`--- INICIANDO SALVAMENTO NO POSTGRES (Item 1.d) --- Status: ${dadosTicket.status}`);
+    logInfo("Postgres", `Iniciando salvamento no Postgres. Status: ${dadosTicket.status}`, { protocolo: dadosTicket.protocolo });
     
-    // --- [ALTERADO] --- A query agora salva a 'descricao_padronizada' e o 'titulo'
     const query = `
         INSERT INTO denuncias (protocolo, nome, email, descricao, prioridade, status, data_ocorrido, titulo)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -174,82 +247,16 @@ async function salvarNoBancoPostgres(dadosTicket) {
         dadosTicket.prioridade,
         dadosTicket.status,
         dadosTicket.data_ocorrido,
-        dadosTicket.titulo // <-- NOVO
+        dadosTicket.titulo
     ];
 
     try {
         const res = await pool.query(query, valores);
-        console.log(`Dados salvos no banco! ID da nova denúncia: ${res.rows[0].id}`);
+        logInfo("Postgres", `Dados salvos no banco! ID da nova denúncia: ${res.rows[0].id}`, { protocolo: dadosTicket.protocolo, id: res.rows[0].id });
         return true;
     } catch (err) {
-        console.error("Erro ao salvar no banco de dados:", err);
+        logError("Postgres", "Erro ao salvar no banco de dados", err, { protocolo: dadosTicket.protocolo });
         return false;
-    }
-}
-
-// --- [NOVO] --- Adicionada a coluna 'titulo' na tabela
-async function inicializarBanco() {
-    const client = await pool.connect(); 
-    try {
-        // ... (código de criação da tabela e colunas 'prioridade', 'status', 'data_ocorrido' ...
-        // Vou omitir por brevidade, mas ele deve estar aqui)
-
-        const createTableQuery = `
-        CREATE TABLE IF NOT EXISTS denuncias (
-            id SERIAL PRIMARY KEY,
-            protocolo VARCHAR(100) NOT NULL UNIQUE,
-            nome VARCHAR(255) NOT NULL,
-            email VARCHAR(255),
-            descricao TEXT,
-            status VARCHAR(50),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        `;
-        await client.query(createTableQuery);
-        console.log("Tabela 'denuncias' verificada/criada.");
-
-        // Objeto para verificar colunas
-        const colunas = {
-            'prioridade': `ALTER TABLE denuncias ADD COLUMN prioridade VARCHAR(50);`,
-            'data_ocorrido': `ALTER TABLE denuncias ADD COLUMN data_ocorrido TIMESTAMP WITH TIME ZONE;`,
-            'titulo': `ALTER TABLE denuncias ADD COLUMN titulo VARCHAR(255);` // <-- NOVO
-        };
-
-        for (const [coluna, addQuery] of Object.entries(colunas)) {
-            const checkQuery = `
-            SELECT column_name FROM information_schema.columns 
-            WHERE table_name='denuncias' AND column_name='${coluna}';
-            `;
-            const res = await client.query(checkQuery);
-            if (res.rows.length === 0) {
-                console.log(`Coluna '${coluna}' não encontrada. Adicionando...`);
-                await client.query(addQuery);
-                console.log(`Coluna '${coluna}' adicionada.`);
-            } else {
-                console.log(`Coluna '${coluna}' já existe.`);
-            }
-        }
-
-        // Verifica e AJUSTA a coluna 'status' (Remove DEFAULT)
-        const checkStatusQuery = `
-        SELECT column_default FROM information_schema.columns 
-        WHERE table_name='denuncias' AND column_name='status';
-        `;
-        const resStatus = await client.query(checkStatusQuery);
-        if (resStatus.rows.length > 0 && resStatus.rows[0].column_default != null) {
-            console.log("Coluna 'status' possui um valor DEFAULT. Removendo...");
-            await client.query(`ALTER TABLE denuncias ALTER COLUMN status DROP DEFAULT;`);
-            console.log("DEFAULT removido da coluna 'status'.");
-        } else {
-            console.log("Coluna 'status' já está configurada corretamente (sem DEFAULT).");
-        }
-
-        console.log("Banco de dados inicializado e schema atualizado.");
-
-    } catch (err) {
-        console.error("Erro ao inicializar ou atualizar o schema:", err);
-    } finally {
-        client.release(); 
     }
 }
 
@@ -257,8 +264,14 @@ async function inicializarBanco() {
 // --- ROTA PRINCIPAL DO WEBHOOK ---
 app.post('/webhook', async (req, res) => {
     const intentName = req.body.queryResult.intent.displayName;
+    // --- [NOVO] --- ID de Rastreio (Trace ID)
+    const dialogflowSessionId = req.body.session.split('/').pop();
+    let traceContext = { intentName, dialogflowSessionId };
+
+    logInfo("Webhook", "Nova requisição recebida do Dialogflow", traceContext);
 
     if (intentName === 'AbrirChamadoSuporte') {
+        let protocolo; // Definido aqui para estar acessível no 'catch'
         try {
             // --- 1. Extração de Dados ---
             const parameters = req.body.queryResult.parameters;
@@ -269,21 +282,24 @@ app.post('/webhook', async (req, res) => {
             const dataOcorridoStr = parameters.data_ocorrido; 
 
             let email = 'Não informado';
-            const contextoEmail = req.body.queryResult.outputContexts.find(ctx => ctx.parameters && ctx.parameters.email);
+            // Lógica de busca de e-mail corrigida
+            const contextoEmail = req.body.queryResult.outputContexts.find(ctx => ctx.name.endsWith('/contexts/email_contexto') && ctx.parameters.email);
             if (contextoEmail) {
                 email = contextoEmail.parameters.email;
             } else if (parameters.email) {
-                email = parameters.email;
+                email = parameters.email; // Fallback se estiver no parâmetro direto
             }
+            traceContext.email = email; // Adiciona e-mail ao contexto de log
 
             // --- 2. Validação de Data (Item 2.b) ---
             const dataOcorrido = new Date(dataOcorridoStr);
             const dataAgora = new Date();
+            // Comparação de data zerada (apenas dia)
             const dataOcorridoZerada = new Date(dataOcorrido).setHours(0, 0, 0, 0);
             const dataAgoraZerada = new Date(dataAgora).setHours(0, 0, 0, 0);
 
             if (dataOcorridoZerada > dataAgoraZerada) {
-                console.log(`Validação falhou: Data do ocorrido (${dataOcorridoStr}) está no futuro.`);
+                logInfo("Webhook", `Validação falhou: Data do ocorrido (${dataOcorridoStr}) está no futuro.`, traceContext);
                 return res.json({
                     fulfillmentMessages: [{
                         text: { text: [
@@ -294,7 +310,9 @@ app.post('/webhook', async (req, res) => {
             }
 
             // --- 3. Lógica de Negócio e Auto-Resumo (Item 2.c) ---
-            const protocolo = gerarProtocolo();
+            protocolo = gerarProtocolo(); // Gera o protocolo
+            traceContext.protocolo = protocolo; // --- [NOVO] --- Adiciona o protocolo ao contexto de log
+            
             const dataOcorridoFormatada = dataOcorrido.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
             let statusInicial = 'Recebido'; 
@@ -302,10 +320,8 @@ app.post('/webhook', async (req, res) => {
                 statusInicial = 'Revisão Pendente'; 
             }
 
-            // --- [NOVO] --- Criando o Título (Auto-resumo)
             const tituloTicket = `Denúncia: ${descricaoProblema.substring(0, 40)}...`;
 
-            // --- [NOVO] --- Criando a Descrição Padronizada (Auto-resumo)
             const descricaoPadronizada = `
             <h3>Resumo da Denúncia (Protocolo: ${protocolo})</h3>
             <ul>
@@ -319,15 +335,16 @@ app.post('/webhook', async (req, res) => {
             <h4>Descrição Completa do Usuário</h4>
             <p>${descricaoProblema}</p>
             `;
-            // --- Fim do Item 2.c ---
+            
+            logInfo("Webhook", "Auto-resumo e lógica de negócio concluídos", traceContext);
 
             // --- 4. Preparando Dados e Executando Ações ---
             const dadosTicket = { 
                 protocolo, 
                 nome, 
                 email, 
-                descricao: descricaoPadronizada, // <-- [ALTERADO]
-                titulo: tituloTicket,            // <-- [NOVO]
+                descricao: descricaoPadronizada,
+                titulo: tituloTicket,
                 prioridade,
                 status: statusInicial,
                 data_ocorrido: dataOcorrido 
@@ -343,20 +360,23 @@ app.post('/webhook', async (req, res) => {
             // --- 5. Resposta Final ---
             if (emailEnviado && salvoNoBanco) {
                 const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. O status atual é: ${statusInicial}. Uma confirmação foi enviada para ${email}.`;
+                logInfo("Webhook", "Fluxo 'AbrirChamadoSuporte' concluído com sucesso.", traceContext);
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
             } else {
                 if (!salvoNoBanco) throw new Error("Falha ao salvar no banco de dados.");
                 if (!emailEnviado) throw new Error("Falha ao enviar e-mail de confirmação.");
             }
         } catch (error) {
-            console.error("Erro ao processar webhook (AbrirChamadoSuporte):", error);
+            logError("Webhook", "Erro ao processar webhook (AbrirChamadoSuporte)", error, traceContext);
             return res.json({ fulfillmentMessages: [{ text: { text: [`Desculpe, ocorreu um erro interno. Nossa equipe já foi notificada. (${error.message})`] } }] });
         }
     
     } else if (intentName === 'consultar-status') {
-        // ... (código da consulta de status permanece o mesmo)
         const protocolo = req.body.queryResult.parameters.protocolo;
+        traceContext.protocolo = protocolo; // Adiciona o protocolo ao log
+
         if (!protocolo || protocolo.trim() === '') {
+            logInfo("Webhook", "Tentativa de consulta sem protocolo.", traceContext);
             return res.json({ fulfillmentMessages: [{ text: { text: ['Não entendi o número do protocolo. Poderia repetir?'] } }] });
         }
         try {
@@ -366,22 +386,28 @@ app.post('/webhook', async (req, res) => {
             if (result.rows.length > 0) {
                 const status = result.rows[0].status || 'Status não definido';
                 responseText = `O status do seu protocolo ${protocolo} é: ${status}.`;
+                logInfo("Webhook", "Consulta de status realizada com sucesso (Encontrado).", traceContext);
             } else {
                 responseText = `Não foi possível encontrar uma denúncia com o protocolo ${protocolo}. Por favor, verifique o número e tente novamente.`;
+                logInfo("Webhook", "Consulta de status realizada com sucesso (Não Encontrado).", traceContext);
             }
             return res.json({ fulfillmentMessages: [{ text: { text: [responseText] } }] });
         } catch (error) {
-            console.error('Erro ao consultar o banco (consultar-status):', error);
+            logError("Webhook", "Erro ao consultar o banco (consultar-status)", error, traceContext);
             return res.json({ fulfillmentMessages: [{ text: { text: ['Ocorreu um erro ao consultar o status. Tente novamente mais tarde.'] } }] });
         }
     } else {
+        logInfo("Webhook", `Intent "${intentName}" não tratada por este webhook.`, traceContext);
         return res.json({ fulfillmentMessages: [{ text: { text: [`Intent "${intentName}" não tratada por este webhook.`] } }] });
     }
 });
 
 // --- INICIA O SERVIDOR ---
 app.listen(PORT, () => {
+    // [ALTERADO] - O 'listen' agora chama as duas inicializações
     console.log(`Servidor do webhook rodando na porta ${PORT}`);
-    inicializarBanco();
+    
+    // Inicia as conexões com os bancos
+    inicializarBanco(); // Postgres
+    conectarMongo();    // MongoDB
 });
-
