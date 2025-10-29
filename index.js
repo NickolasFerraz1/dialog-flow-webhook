@@ -4,7 +4,8 @@ const app = express();
 const sgMail = require('@sendgrid/mail');
 const { Pool } = require('pg'); 
 const { MongoClient, ServerApiVersion } = require('mongodb'); 
-const { Buffer } = require('buffer'); // --- [NOVO] --- Necessário para decodificar a senha
+const { Buffer } = require('buffer'); 
+const rateLimit = require('express-rate-limit'); // --- [NOVO] --- Importa o Rate Limiter
 
 require('dotenv').config();
 
@@ -231,11 +232,27 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
+// --- [NOVO] --- CONFIGURAÇÃO DE RATE LIMIT (Item 3.b) ---
+const limiter = rateLimit({
+	windowMs: 15 * 60 * 1000, // 15 minutos
+	max: 100, // Limita cada IP a 100 requisições por janela de 15 minutos
+	message: 'Muitas requisições deste IP. Por favor, tente novamente após 15 minutos.',
+    standardHeaders: true, // Retorna informações do limite nos cabeçalhos `RateLimit-*`
+	legacyHeaders: false, // Desabilita os cabeçalhos `X-RateLimit-*`
+    handler: (req, res, next, options) => {
+        // Loga a tentativa bloqueada
+        logError("RateLimit", `Requisição bloqueada por excesso de tentativas (IP: ${req.ip}).`, new Error('Rate Limit Exceeded'), { ip: req.ip });
+        res.status(options.statusCode).send(options.message);
+    }
+});
 
-// --- [NOVO] --- MIDDLEWARE DE AUTENTICAÇÃO (Item 3.b) ---
-/**
- * Este middleware verifica a autenticação Basic vinda do Dialogflow
- */
+// Aplica o middleware de rate limit a TODAS as requisições
+app.use(limiter);
+// --- Fim do Rate Limit ---
+
+
+// --- MIDDLEWARE DE AUTENTICAÇÃO (Item 3.b) ---
+// ... (sua função 'checkAuth' permanece a mesma) ...
 function checkAuth(req, res, next) {
     logInfo("Auth", "Verificando autenticação do webhook...");
     
@@ -246,44 +263,38 @@ function checkAuth(req, res, next) {
         return res.status(401).json({ error: 'Não autorizado. Cabeçalho de autenticação ausente.' });
     }
 
-    // O cabeçalho vem como "Basic dXNlcjpwYXNz"
     const [type, credentials] = authHeader.split(' ');
 
     if (type !== 'Basic' || !credentials) {
-        logError("Auth", "Falha de autenticação: Formato de cabeçalho incorreto. Esperado 'Basic <token>'.", new Error('Invalid Auth Header format'));
+        logError("Auth", "Falha de autenticação: Formato de cabeçalho incorreto.", new Error('Invalid Auth Header format'));
         return res.status(401).json({ error: 'Não autorizado. Formato de autenticação inválido.' });
     }
 
-    // Decodifica as credenciais de Base64 para "usuario:senha"
     const decoded = Buffer.from(credentials, 'base64').toString('ascii');
     const [user, pass] = decoded.split(':');
 
     const expectedUser = process.env.WEBHOOK_USER;
     const expectedPass = process.env.WEBHOOK_PASS;
 
-    // Compara com as variáveis de ambiente
     if (user === expectedUser && pass === expectedPass) {
         logInfo("Auth", "Autenticação bem-sucedida.", { user });
-        next(); // Sucesso! Continua para a rota '/webhook'
+        next(); 
     } else {
         logError("Auth", "Falha de autenticação: Credenciais inválidas.", new Error('Invalid credentials'), { user });
         return res.status(401).json({ error: 'Não autorizado. Credenciais inválidas.' });
     }
 }
-// --- Fim do Middleware ---
 
 
 // --- ROTA PRINCIPAL DO WEBHOOK ---
-// --- [ALTERADO] --- Adicionamos o middleware 'checkAuth'
-// Agora, toda chamada a /webhook DEVE passar pelo 'checkAuth' primeiro.
 app.post('/webhook', checkAuth, async (req, res) => {
-    // Se o código chegou aqui, a autenticação foi um SUCESSO.
-    
+    // ... (TODA A LÓGICA DA SUA ROTA /webhook permanece exatamente a mesma) ...
+    // ... (Ela só será executada se passar pelo 'limiter' E pelo 'checkAuth') ...
     const intentName = req.body.queryResult.intent.displayName;
     const dialogflowSessionId = req.body.session.split('/').pop();
     let traceContext = { intentName, dialogflowSessionId };
 
-    logInfo("Webhook", "Nova requisição recebida (pós-autenticação)", traceContext);
+    logInfo("Webhook", "Nova requisição recebida (pós-autenticação/rate-limit)", traceContext);
 
     if (intentName === 'AbrirChamadoSuporte') {
         let protocolo; 
@@ -426,3 +437,4 @@ app.listen(PORT, () => {
     inicializarBanco(); // Postgres
     conectarMongo();    // MongoDB
 });
+
