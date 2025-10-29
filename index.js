@@ -17,11 +17,11 @@ const pool = new Pool({
     }
 });
 
-// --- [ALTERADO] --- Função de inicialização do banco mais robusta
+// --- [ALTERADO] --- Função de inicialização mais robusta
 async function inicializarBanco() {
-    const client = await pool.connect(); // Pega uma conexão do pool
+    const client = await pool.connect(); 
     try {
-        // Passo 1: Garante que a tabela exista
+        // Passo 1: Garante que a tabela exista (agora sem o DEFAULT para 'status')
         const createTableQuery = `
         CREATE TABLE IF NOT EXISTS denuncias (
             id SERIAL PRIMARY KEY,
@@ -29,38 +29,51 @@ async function inicializarBanco() {
             nome VARCHAR(255) NOT NULL,
             email VARCHAR(255),
             descricao TEXT,
-            status VARCHAR(50) DEFAULT 'Recebido',
+            status VARCHAR(50), -- <-- [ALTERADO] Removemos o DEFAULT
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         `;
         await client.query(createTableQuery);
         console.log("Tabela 'denuncias' verificada/criada.");
 
-        // Passo 2: Verifica se a coluna 'prioridade' já existe
-        const checkColumnQuery = `
+        // Passo 2: Verifica e adiciona a coluna 'prioridade'
+        const checkPrioridadeQuery = `
         SELECT column_name FROM information_schema.columns 
         WHERE table_name='denuncias' AND column_name='prioridade';
         `;
-        const result = await client.query(checkColumnQuery);
-
-        // Passo 3: Se a coluna não existir, adiciona
-        if (result.rows.length === 0) {
-            console.log("Coluna 'prioridade' não encontrada. Adicionando à tabela...");
-            const addColumnQuery = `ALTER TABLE denuncias ADD COLUMN prioridade VARCHAR(50);`;
-            await client.query(addColumnQuery);
-            console.log("Coluna 'prioridade' adicionada com sucesso!");
+        const resPrioridade = await client.query(checkPrioridadeQuery);
+        if (resPrioridade.rows.length === 0) {
+            console.log("Coluna 'prioridade' não encontrada. Adicionando...");
+            await client.query(`ALTER TABLE denuncias ADD COLUMN prioridade VARCHAR(50);`);
+            console.log("Coluna 'prioridade' adicionada.");
         } else {
             console.log("Coluna 'prioridade' já existe.");
+        }
+
+        // Passo 3: Verifica e AJUSTA a coluna 'status'
+        // (Remove o DEFAULT 'Recebido' para podermos controlar 100% via código)
+        const checkStatusQuery = `
+        SELECT column_default FROM information_schema.columns 
+        WHERE table_name='denuncias' AND column_name='status';
+        `;
+        const resStatus = await client.query(checkStatusQuery);
+        if (resStatus.rows.length > 0 && resStatus.rows[0].column_default != null) {
+            console.log("Coluna 'status' possui um valor DEFAULT. Removendo...");
+            await client.query(`ALTER TABLE denuncias ALTER COLUMN status DROP DEFAULT;`);
+            console.log("DEFAULT removido da coluna 'status'.");
+        } else {
+            console.log("Coluna 'status' já está configurada corretamente (sem DEFAULT).");
         }
 
         console.log("Banco de dados inicializado e schema atualizado.");
 
     } catch (err) {
-        console.error("Erro ao inicializar ou atualizar o schema do banco de dados:", err);
+        console.error("Erro ao inicializar ou atualizar o schema:", err);
     } finally {
-        client.release(); // Libera a conexão de volta para o pool
+        client.release(); 
     }
 }
+
 
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
@@ -89,6 +102,7 @@ async function enviarTicketPorEmail(dadosTicket) {
             <li><strong>Cliente:</strong> ${dadosTicket.nome}</li>
             <li><strong>E-mail do Cliente:</strong> ${dadosTicket.email}</li>
             <li><strong>Prioridade:</strong> ${dadosTicket.prioridade}</li>
+            <li><strong>Status Atual:</strong> ${dadosTicket.status}</li>
         </ul><hr><h4>Descrição do Problema</h4><p>${dadosTicket.descricao}</p>`
     };
     try {
@@ -101,28 +115,26 @@ async function enviarTicketPorEmail(dadosTicket) {
     }
 }
 
-// --- [NOVO] --- Função para o Item 1.c
 async function enviarNotificacaoAntifraude(dadosTicket) {
     console.log("--- INICIANDO NOTIFICAÇÃO PARA EQUIPE ANTIFRAUDE (Item 1.c) ---");
     const emailEquipe = process.env.ANTIFRAUDE_EMAIL;
-
     if (!emailEquipe) {
-        console.error("Variável de ambiente ANTIFRAUDE_EMAIL não definida. Notificação não enviada.");
+        console.error("Variável de ambiente ANTIFRAUDE_EMAIL não definida.");
         return false;
     }
-
     const msg = {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot Alerta de Risco' },
         to: emailEquipe,
-        subject: `ALERTA: Nova Denúncia de ALTA PRIORIDADE - Protocolo: ${dadosTicket.protocolo}`,
+        subject: `ALERTA (Revisão Pendente): Nova Denúncia de ALTA PRIORIDADE - Protocolo: ${dadosTicket.protocolo}`,
         html: `
-        <h3>ALERTA DE ALTA PRIORIDADE</h3>
-        <p>Uma nova denúncia classificada como alta prioridade foi registrada e requer atenção imediata.</p>
+        <h3>ALERTA DE ALTA PRIORIDADE (REVISÃO PENDENTE)</h3>
+        <p>Uma nova denúncia classificada como alta prioridade foi registrada e marcada como "Revisão Pendente".</p>
         <ul>
             <li><strong>Protocolo:</strong> ${dadosTicket.protocolo}</li>
             <li><strong>Denunciante:</strong> ${dadosTicket.nome}</li>
             <li><strong>E-mail:</strong> ${dadosTicket.email}</li>
             <li><strong>Prioridade:</strong> ${dadosTicket.prioridade}</li>
+            <li><strong>Status:</strong> ${dadosTicket.status}</li>
         </ul><hr><h4>Descrição da Denúncia</h4><p>${dadosTicket.descricao}</p>`
     };
     try {
@@ -135,12 +147,13 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
     }
 }
 
+// --- [ALTERADO] --- Função agora salva o 'status' dinamicamente
 async function salvarNoBancoPostgres(dadosTicket) {
-    console.log("--- INICIANDO SALVAMENTO NO POSTGRES (Item 1.d) ---");
-    // --- [ALTERADO] --- Query agora inclui a coluna 'prioridade'
+    console.log(`--- INICIANDO SALVAMENTO NO POSTGRES (Item 1.d) --- Status: ${dadosTicket.status}`);
+    
     const query = `
-        INSERT INTO denuncias (protocolo, nome, email, descricao, prioridade)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO denuncias (protocolo, nome, email, descricao, prioridade, status)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id;
     `;
     const valores = [
@@ -148,7 +161,8 @@ async function salvarNoBancoPostgres(dadosTicket) {
         dadosTicket.nome,
         dadosTicket.email,
         dadosTicket.descricao,
-        dadosTicket.prioridade // --- [ALTERADO] --- Adicionado novo valor
+        dadosTicket.prioridade,
+        dadosTicket.status // <-- NOVO
     ];
 
     try {
@@ -167,12 +181,11 @@ app.post('/webhook', async (req, res) => {
 
     if (intentName === 'AbrirChamadoSuporte') {
         try {
-            // --- [ALTERADO] --- Extrai o novo parâmetro 'prioridade'
             const parameters = req.body.queryResult.parameters;
             const nomeParam = parameters.nome;
             const nome = (nomeParam && nomeParam.name) ? nomeParam.name : (nomeParam || 'Não informado');
             const descricaoProblema = parameters.descricao_problema;
-            const prioridade = parameters.prioridade; // <-- NOVO
+            const prioridade = parameters.prioridade; 
 
             let email = 'Não informado';
             const contextoEmail = req.body.queryResult.outputContexts.find(ctx => ctx.parameters && ctx.parameters.email);
@@ -181,22 +194,37 @@ app.post('/webhook', async (req, res) => {
             }
 
             const protocolo = gerarProtocolo();
-            const dadosTicket = { protocolo, nome, email, descricao: descricaoProblema, prioridade };
 
-            // --- [NOVO] --- Lógica de Notificação do Item 1.c
+            // --- [NOVO] --- Lógica do Item 2.a (Human-in-the-loop)
+            let statusInicial = 'Recebido'; // Padrão
             if (prioridade && prioridade.toLowerCase() === 'alta') {
+                statusInicial = 'Revisão Pendente'; // Define o status para a fila de revisão
+            }
+
+            // --- [ALTERADO] --- Adiciona o statusInicial aos dados do ticket
+            const dadosTicket = { 
+                protocolo, 
+                nome, 
+                email, 
+                descricao: descricaoProblema, 
+                prioridade,
+                status: statusInicial // <-- NOVO
+            };
+
+            // --- [ALTERADO] --- Chama a notificação APENAS se for alta prioridade
+            if (statusInicial === 'Revisão Pendente') {
                 await enviarNotificacaoAntifraude(dadosTicket);
             }
             
-            // --- [ALTERADO] --- Continua o fluxo normal
+            // Continua o fluxo normal
             const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket);
             const emailEnviado = await enviarTicketPorEmail(dadosTicket);
             
             if (emailEnviado && salvoNoBanco) {
-                const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. Uma confirmação foi enviada para ${email}.`;
+                const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. O status atual é: ${statusInicial}. Uma confirmação foi enviada para ${email}.`;
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
             } else {
-                throw new Error("Falha ao salvar no banco ou enviar e-mail de confirmação.");
+                throw new Error("Falha ao salvar no banco ou enviar e-Tmail de confirmação.");
             }
         } catch (error) {
             console.error("Erro ao processar webhook (AbrirChamadoSuporte):", error);
@@ -204,6 +232,7 @@ app.post('/webhook', async (req, res) => {
         }
     
     } else if (intentName === 'consultar-status') {
+        // ... (código da consulta de status permanece o mesmo)
         const protocolo = req.body.queryResult.parameters.protocolo;
         if (!protocolo || protocolo.trim() === '') {
             return res.json({ fulfillmentMessages: [{ text: { text: ['Não entendi o número do protocolo. Poderia repetir?'] } }] });
@@ -213,7 +242,9 @@ app.post('/webhook', async (req, res) => {
             const result = await pool.query(query, [protocolo]);
             let responseText = '';
             if (result.rows.length > 0) {
-                responseText = `O status do seu protocolo ${protocolo} é: ${result.rows[0].status}.`;
+                // --- [ALTERADO] --- Garante que mesmo status nulo seja tratado
+                const status = result.rows[0].status || 'Status não definido';
+                responseText = `O status do seu protocolo ${protocolo} é: ${status}.`;
             } else {
                 responseText = `Não foi possível encontrar uma denúncia com o protocolo ${protocolo}. Por favor, verifique o número e tente novamente.`;
             }
@@ -232,3 +263,4 @@ app.listen(PORT, () => {
     console.log(`Servidor do webhook rodando na porta ${PORT}`);
     inicializarBanco();
 });
+
