@@ -519,7 +519,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
         }
 
     // --- ROTA: excluir-meus-dados (Item 3.c) ---
-    } else if (intentName === 'excluir-meus-dados') {
+    } else if (intentName === 'excluir-dados') {
         const protocolo = req.body.queryResult.parameters.protocolo;
         traceContext.protocolo = protocolo; 
 
