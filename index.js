@@ -2,25 +2,23 @@
 const express = require('express');
 const app = express();
 const sgMail = require('@sendgrid/mail');
-const { Pool } = require('pg'); // Driver Postgres
-const { MongoClient, ServerApiVersion } = require('mongodb'); // Driver MongoDB
-const { Buffer } = require('buffer'); // Para Autenticação Basic
-const rateLimit = require('express-rate-limit'); // Para Rate Limit
+const { Pool } = require('pg'); 
+const { MongoClient, ServerApiVersion } = require('mongodb'); 
+const { Buffer } = require('buffer'); 
+const rateLimit = require('express-rate-limit'); 
 
 require('dotenv').config();
 
-// --- CONFIGURAÇÃO DO SENDGRID ---
+// --- CONFIGURAÇÕES (SendGrid, Postgres, MongoDB) ---
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
-// --- CONFIGURAÇÃO DO BANCO DE DADOS (POSTGRES) ---
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
-      rejectUnauthorized: false // Necessário para conexões com o Render
+      rejectUnauthorized: false
     }
 });
 
-// --- CONFIGURAÇÃO DO BANCO DE DADOS (MONGODB) ---
 const mongoUri = process.env.MONGO_URI;
 const mongoClient = new MongoClient(mongoUri, {
   serverApi: {
@@ -29,69 +27,42 @@ const mongoClient = new MongoClient(mongoUri, {
     deprecationErrors: true,
   }
 });
-let logDB; // Variável global para acessar o banco de logs
+let logDB; 
 
 // --- FUNÇÃO DE MASCARAMENTO (Item 3.c) ---
-/**
- * Mascara PII (CPF/CNPJ) em uma string de texto.
- * @param {string} text O texto para mascarar
- * @returns {string} O texto com PII mascarado
- */
 function maskPII(text) {
     if (typeof text !== 'string' || !text) {
         return text;
     }
-    
     let maskedText = text;
-
-    // Regex para CPF (XXX.XXX.XXX-XX ou XXXXXXXXXXX)
-    // Substitui por XXX.***.***-XX
+    // CPF
     maskedText = maskedText.replace(
         /(\d{3})[\.]?(\d{3})[\.]?(\d{3})[-]?(\d{2})/g, 
         (match, p1, p2, p3, p4) => `${p1}.***.***-${p4}`
     );
-
-    // Regex para CNPJ (XX.XXX.XXX/XXXX-XX ou XXXXXXXXXXXXXX)
-    // Substitui por XX.***.***/XXXX-XX
+    // CNPJ
     maskedText = maskedText.replace(
         /(\d{2})[\.]?(\d{3})[\.]?(\d{3})[\/]?(\d{4})[-]?(\d{2})/g,
         (match, p1, p2, p3, p4, p5) => `${p1}.***.***/${p4}-${p5}`
     );
-
     return maskedText;
 }
 
-
-// --- SISTEMA DE LOGS ESTRUTURADOS (Item 3.a) ---
-
-/**
- * Conecta ao MongoDB e prepara a coleção de logs
- */
+// --- SISTEMA DE LOGS (salvarLog, logInfo, logError) ---
 async function conectarMongo() {
     try {
         await mongoClient.connect();
         await mongoClient.db("admin").command({ ping: 1 });
         console.log("Conexão com MongoDB Atlas estabelecida com sucesso!");
-        // Define o banco de dados e a coleção que vamos usar
         logDB = mongoClient.db("logs_sprint4").collection("denuncias_logs");
         logInfo("MongoDB", "Coletor de logs do MongoDB inicializado.");
     } catch (err) {
-        // Se não conseguir conectar ao Mongo, loga no console e continua
         console.error("ERRO CRÍTICO AO CONECTAR NO MONGODB:", err);
     }
 }
-
-/**
- * Salva um log estruturado no MongoDB (Item 1.d)
- * @param {string} level - Nível do log (INFO, ERROR, WARN)
- * @param {string} component - Onde o log se originou (ex: Postgres, SendGrid, Webhook)
- * @param {string} message - A mensagem de log
- * @param {object} context - Dados adicionais (protocolo, intent, erro, etc.)
- */
 async function salvarLog(level, component, message, context = {}) {
-    // --- Mascaramento de PII para Logs (Item 3.c) ---
     const maskedContext = { ...context }; 
-    const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema']; 
+    const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema', 'uf']; 
 
     for (const key of sensitiveKeys) {
         if (maskedContext[key] && typeof maskedContext[key] === 'string') {
@@ -99,24 +70,21 @@ async function salvarLog(level, component, message, context = {}) {
         }
     }
     const maskedMessage = maskPII(message);
-    // --- Fim do Mascaramento ---
 
     const logEntry = {
         timestamp: new Date(),
         level,
         component,
-        message: maskedMessage, // Usa a mensagem mascarada
-        ...maskedContext // Usa o contexto mascarado
+        message: maskedMessage,
+        ...maskedContext
     };
 
-    // 1. Imprime no console (para o log do Render)
     if (level === 'ERROR') {
         console.error(JSON.stringify(logEntry, null, 2));
     } else {
         console.log(JSON.stringify(logEntry, null, 2));
     }
 
-    // 2. Tenta salvar no MongoDB
     if (logDB) {
         try {
             await logDB.insertOne(logEntry);
@@ -124,11 +92,9 @@ async function salvarLog(level, component, message, context = {}) {
             console.error("Falha ao salvar log no MongoDB:", err);
         }
     } else if (level === 'ERROR' && component !== 'MongoDB') {
-        // Se o logDB não iniciou E temos um erro, loga no console
         console.error("logDB não inicializado. Log de ERRO não salvo no MongoDB.");
     }
 }
-// Funções auxiliares para facilitar o logging
 const logInfo = (component, message, context) => salvarLog('INFO', component, message, context);
 const logError = (component, message, error, context) => {
     const errorDetails = {
@@ -139,17 +105,11 @@ const logError = (component, message, error, context) => {
     };
     salvarLog('ERROR', component, message, { ...context, error: errorDetails });
 };
-// --- Fim do Sistema de Logs ---
 
-
-// --- FUNÇÕES DE BANCO (POSTGRES) ---
-/**
- * Verifica o schema do banco Postgres e cria/altera colunas conforme necessário.
- */
+// --- FUNÇÕES DE BANCO (inicializarBanco, salvarNoBancoPostgres) ---
 async function inicializarBanco() {
     const client = await pool.connect(); 
     try {
-        // Passo 1: Garante que a tabela exista
         const createTableQuery = `
         CREATE TABLE IF NOT EXISTS denuncias (
             id SERIAL PRIMARY KEY,
@@ -164,14 +124,14 @@ async function inicializarBanco() {
         await client.query(createTableQuery);
         logInfo("Postgres", "Tabela 'denuncias' verificada/criada.");
 
-        // Objeto para verificar colunas dinamicamente
+        // Adiciona colunas se não existirem
         const colunas = {
             'prioridade': `ALTER TABLE denuncias ADD COLUMN prioridade VARCHAR(50);`,
             'data_ocorrido': `ALTER TABLE denuncias ADD COLUMN data_ocorrido TIMESTAMP WITH TIME ZONE;`,
-            'titulo': `ALTER TABLE denuncias ADD COLUMN titulo VARCHAR(255);`
+            'titulo': `ALTER TABLE denuncias ADD COLUMN titulo VARCHAR(255);`,
+            'uf': `ALTER TABLE denuncias ADD COLUMN uf VARCHAR(100);` // <-- NOVO
         };
 
-        // Loop para verificar e adicionar cada coluna
         for (const [coluna, addQuery] of Object.entries(colunas)) {
             const checkQuery = `
             SELECT column_name FROM information_schema.columns 
@@ -210,15 +170,12 @@ async function inicializarBanco() {
     }
 }
 
-/**
- * [ITEM 1.d] Salva o núcleo da denúncia no banco de dados Postgres.
- */
 async function salvarNoBancoPostgres(dadosTicket) {
     logInfo("Postgres", `Iniciando salvamento no Postgres. Status: ${dadosTicket.status}`, { protocolo: dadosTicket.protocolo });
     
     const query = `
-        INSERT INTO denuncias (protocolo, nome, email, descricao, prioridade, status, data_ocorrido, titulo)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO denuncias (protocolo, nome, email, descricao, prioridade, status, data_ocorrido, titulo, uf)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING id;
     `;
     const valores = [
@@ -229,7 +186,8 @@ async function salvarNoBancoPostgres(dadosTicket) {
         dadosTicket.prioridade,
         dadosTicket.status,
         dadosTicket.data_ocorrido,
-        dadosTicket.titulo
+        dadosTicket.titulo,
+        dadosTicket.uf
     ];
 
     try {
@@ -243,8 +201,7 @@ async function salvarNoBancoPostgres(dadosTicket) {
 }
 
 
-// --- FUNÇÕES DE E-MAIL (SENDGRID) ---
-
+// --- FUNÇÕES DE E-MAIL (gerarProtocolo, enviarTicketPorEmail, enviarNotificacaoAntifraude) ---
 function gerarProtocolo() {
     const data = new Date();
     const ano = data.getFullYear();
@@ -254,20 +211,16 @@ function gerarProtocolo() {
     return `SUP-${ano}${mes}${dia}-${aleatorio}`;
 }
 
-/**
- * [ITEM 1.a] Envia o ticket/denúncia por e-mail para o cliente e suporte.
- */
 async function enviarTicketPorEmail(dadosTicket) {
     logInfo("SendGrid", "Iniciando envio de e-mail de confirmação", { protocolo: dadosTicket.protocolo, email: dadosTicket.email });
     
     const msg = {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot de Suporte' },
-        to: ['ct.sprint4@gmail.com'], // E-mail de suporte sempre
-        subject: `Novo Chamado: ${dadosTicket.protocolo} - ${dadosTicket.titulo}`, // Usa o novo título
-        html: dadosTicket.descricao // Usa a descrição padronizada
+        to: ['ct.sprint4@gmail.com'], 
+        subject: `Novo Chamado: ${dadosTicket.protocolo} - ${dadosTicket.titulo}`, 
+        html: dadosTicket.descricao 
     };
 
-    // Adiciona o e-mail do cliente APENAS se ele for válido
     if (dadosTicket.email && dadosTicket.email.includes('@')) {
         msg.to.push(dadosTicket.email);
         logInfo("SendGrid", `Email do cliente ('${dadosTicket.email}') é válido. Adicionando à lista de destinatários.`, { protocolo: dadosTicket.protocolo });
@@ -285,9 +238,6 @@ async function enviarTicketPorEmail(dadosTicket) {
     }
 }
 
-/**
- * [ITEM 1.c] Envia notificação para a equipe antifraude.
- */
 async function enviarNotificacaoAntifraude(dadosTicket) {
     logInfo("SendGrid", "Iniciando notificação para equipe antifraude (Alta Prioridade)", { protocolo: dadosTicket.protocolo });
     const emailEquipe = process.env.ANTIFRAUDE_EMAIL;
@@ -300,7 +250,7 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot Alerta de Risco' },
         to: emailEquipe,
         subject: `ALERTA (Revisão Pendente): Nova Denúncia de ALTA PRIORIDADE - Protocolo: ${dadosTicket.protocolo}`,
-        html: dadosTicket.descricao // Usa a descrição padronizada
+        html: dadosTicket.descricao 
     };
     try {
         await sgMail.send(msg);
@@ -313,56 +263,48 @@ async function enviarNotificacaoAntifraude(dadosTicket) {
 }
 
 
-// --- CONFIGURAÇÃO DO SERVIDOR (EXPRESS) ---
+// --- CONFIGURAÇÃO DO SERVIDOR ---
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
 // --- CONFIGURAÇÃO DE RATE LIMIT (Item 3.b) ---
 const limiter = rateLimit({
-	windowMs: 15 * 60 * 1000, // 15 minutos
-	max: 100, // Limita cada IP a 100 requisições por janela de 15 minutos
+	windowMs: 15 * 60 * 1000, 
+	max: 100, 
 	message: 'Muitas requisições deste IP. Por favor, tente novamente após 15 minutos.',
-    standardHeaders: true, // Retorna informações do limite nos cabeçalhos `RateLimit-*`
-	legacyHeaders: false, // Desabilita os cabeçalhos `X-RateLimit-*`
+    standardHeaders: true, 
+	legacyHeaders: false, 
     handler: (req, res, next, options) => {
-        // Loga a tentativa bloqueada
         logError("RateLimit", `Requisição bloqueada por excesso de tentativas (IP: ${req.ip}).`, new Error('Rate Limit Exceeded'), { ip: req.ip });
         res.status(options.statusCode).send(options.message);
     }
 });
-// Aplica o middleware de rate limit a TODAS as requisições
 app.use(limiter);
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO (Item 3.b) ---
-/**
- * Verifica as credenciais de Autenticação Basic enviadas pelo Dialogflow.
- */
 function checkAuth(req, res, next) {
     logInfo("Auth", "Verificando autenticação do webhook...");
-    
     const authHeader = req.headers['authorization'];
-    
     if (!authHeader) {
         logError("Auth", "Falha de autenticação: Cabeçalho de autorização ausente.", new Error('Missing Auth Header'));
         return res.status(401).json({ error: 'Não autorizado. Cabeçalho de autenticação ausente.' });
     }
-
+    
     const [type, credentials] = authHeader.split(' ');
-
     if (type !== 'Basic' || !credentials) {
-        logError("Auth", "Falha de autenticação: Formato de cabeçalho incorreto.", new Error('Invalid Auth Header format'));
-        return res.status(401).json({ error: 'Não autorizado. Formato de autenticação inválido.' });
+        logError("Auth", "Falha de autenticação: Tipo de autenticação inválido ou ausente.", new Error('Invalid Auth Type'));
+        return res.status(401).json({ error: 'Não autorizado. Tipo de autenticação inválido.' });
     }
 
     const decoded = Buffer.from(credentials, 'base64').toString('ascii');
     const [user, pass] = decoded.split(':');
-
+    
     const expectedUser = process.env.WEBHOOK_USER;
     const expectedPass = process.env.WEBHOOK_PASS;
 
     if (user === expectedUser && pass === expectedPass) {
         logInfo("Auth", "Autenticação bem-sucedida.", { user });
-        next(); // Continua para a rota principal
+        next(); 
     } else {
         logError("Auth", "Falha de autenticação: Credenciais inválidas.", new Error('Invalid credentials'), { user });
         return res.status(401).json({ error: 'Não autorizado. Credenciais inválidas.' });
@@ -379,7 +321,6 @@ app.post('/webhook', checkAuth, async (req, res) => {
 
     logInfo("Webhook", "Nova requisição recebida (pós-autenticação/rate-limit)", traceContext);
 
-    // --- ROTA: AbrirChamadoSuporte ---
     if (intentName === 'AbrirChamadoSuporte') {
         let protocolo; 
         try {
@@ -389,9 +330,9 @@ app.post('/webhook', checkAuth, async (req, res) => {
             const nome = (nomeParam && nomeParam.name) ? nomeParam.name : (nomeParam || 'Não informado');
             const descricaoProblema = parameters.descricao_problema;
             const prioridade = parameters.prioridade; 
-            const dataOcorridoStr = parameters.data_ocorrido; 
+            const dataOcorridoStr = parameters.data_ocorrido;
+            const uf = parameters.uf; // <-- NOVO
 
-            // Lógica de busca de e-mail robusta
             let email = 'Não informado';
             if (parameters.email && parameters.email !== '') {
                 email = parameters.email;
@@ -403,9 +344,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
                     }
                 }
             }
-            // Adiciona PII ao contexto de log (será mascarado pelo salvarLog)
             traceContext.email = email; 
-            traceContext.nome = nome;
 
             // --- 2. Validação de Data (Item 2.b) ---
             const dataOcorrido = new Date(dataOcorridoStr);
@@ -430,20 +369,21 @@ app.post('/webhook', checkAuth, async (req, res) => {
             
             const dataOcorridoFormatada = dataOcorrido.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
-            // Item 2.a: Human-in-the-loop
             let statusInicial = 'Recebido'; 
             if (prioridade && prioridade.toLowerCase() === 'alta') {
                 statusInicial = 'Revisão Pendente'; 
             }
 
-            // Item 2.c: Título e Descrição Padronizada
             const tituloTicket = `Denúncia: ${descricaoProblema.substring(0, 40)}...`;
+
+            // --- [ALTERADO] --- Adiciona a UF ao auto-resumo
             const descricaoPadronizada = `
             <h3>Resumo da Denúncia (Protocolo: ${protocolo})</h3>
             <ul>
                 <li><strong>Denunciante:</strong> ${nome}</li>
                 <li><strong>E-mail:</strong> ${email}</li>
                 <li><strong>Data do Ocorrido:</strong> ${dataOcorridoFormatada}</li>
+                <li><strong>UF do Ocorrido:</strong> ${uf}</li> <!-- NOVO -->
                 <li><strong>Prioridade:</strong> ${prioridade}</li>
                 <li><strong>Status Inicial:</strong> ${statusInicial}</li>
             </ul>
@@ -452,11 +392,10 @@ app.post('/webhook', checkAuth, async (req, res) => {
             <p>${descricaoProblema}</p>
             `;
             
-            // Adiciona a descrição ao contexto de log (será mascarada)
-            traceContext.descricao_problema = descricaoProblema;
-            logInfo("Webhook", "Auto-resumo e lógica de negócio concluídos", traceContext);
+            logInfo("Webhook", "Auto-resumo e lógica de negócio concluídos", { ...traceContext, uf });
 
             // --- 4. Preparando Dados e Executando Ações ---
+            // --- [ALTERADO] --- Adiciona 'uf' ao objeto de dados
             const dadosTicket = { 
                 protocolo, 
                 nome, 
@@ -465,20 +404,20 @@ app.post('/webhook', checkAuth, async (req, res) => {
                 titulo: tituloTicket,
                 prioridade,
                 status: statusInicial,
-                data_ocorrido: dataOcorrido 
+                data_ocorrido: dataOcorrido,
+                uf: uf // <-- NOVO
             };
 
             if (statusInicial === 'Revisão Pendente') {
-                await enviarNotificacaoAntifraude(dadosTicket); // Item 1.c
+                await enviarNotificacaoAntifraude(dadosTicket);
             }
             
-            const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket); // Item 1.d
-            const emailEnviado = await enviarTicketPorEmail(dadosTicket); // Item 1.a
+            const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket);
+            const emailEnviado = await enviarTicketPorEmail(dadosTicket);
             
             // --- 5. Resposta Final ---
             if (emailEnviado && salvoNoBanco) {
                 const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. O status atual é: ${statusInicial}. Uma confirmação foi enviada para ${email}.`;
-                // Este log final também terá o nome/email mascarados no Mongo
                 logInfo("Webhook", "Fluxo 'AbrirChamadoSuporte' concluído com sucesso.", traceContext);
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
             } else {
@@ -490,7 +429,6 @@ app.post('/webhook', checkAuth, async (req, res) => {
             return res.json({ fulfillmentMessages: [{ text: { text: [`Desculpe, ocorreu um erro interno. Nossa equipe já foi notificada. (${error.message})`] } }] });
         }
     
-    // --- ROTA: consultar-status ---
     } else if (intentName === 'consultar-status') {
         const protocolo = req.body.queryResult.parameters.protocolo;
         traceContext.protocolo = protocolo; 
@@ -500,7 +438,6 @@ app.post('/webhook', checkAuth, async (req, res) => {
             return res.json({ fulfillmentMessages: [{ text: { text: ['Não entendi o número do protocolo. Poderia repetir?'] } }] });
         }
         try {
-            // Item 1.b: Consulta de status
             const query = 'SELECT status FROM denuncias WHERE protocolo = $1';
             const result = await pool.query(query, [protocolo]);
             let responseText = '';
@@ -518,8 +455,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
             return res.json({ fulfillmentMessages: [{ text: { text: ['Ocorreu um erro ao consultar o status. Tente novamente mais tarde.'] } }] });
         }
 
-    // --- ROTA: excluir-meus-dados (Item 3.c) ---
-    } else if (intentName === 'excluir-dados') {
+    } else if (intentName === 'excluir-dados') { // (Seu nome pode ser 'excluir-meus-dados')
         const protocolo = req.body.queryResult.parameters.protocolo;
         traceContext.protocolo = protocolo; 
 
@@ -538,14 +474,14 @@ app.post('/webhook', checkAuth, async (req, res) => {
                     email = '[ANONIMIZADO]',
                     descricao = '[CONTEÚDO ANONIMIZADO PELO USUÁRIO]',
                     titulo = '[ANONIMIZADO]',
-                    status = 'Anonimizado'
+                    status = 'Anonimizado',
+                    uf = '[ANONIMIZADO]' -- <-- NOVO
                 WHERE protocolo = $1;
             `;
             
             const result = await pool.query(query, [protocolo]);
             let responseText = '';
 
-            // result.rowCount informa quantas linhas foram afetadas
             if (result.rowCount > 0) {
                 responseText = `Processo concluído. Os dados pessoais associados ao protocolo ${protocolo} foram permanentemente anonimizados.`;
                 logInfo("Webhook", `Anonimização do protocolo ${protocolo} concluída com sucesso.`, traceContext);
@@ -557,13 +493,11 @@ app.post('/webhook', checkAuth, async (req, res) => {
             return res.json({ fulfillmentMessages: [{ text: { text: [responseText] } }] });
 
         } catch (error) {
-            logError("Webhook", "Erro ao anonimizar dados no banco (excluir-meus-dados)", error, traceContext);
+            logError("Webhook", "Erro ao anonimizar dados no banco (excluir-dados)", error, traceContext);
             return res.json({ fulfillmentMessages: [{ text: { text: ['Ocorreu um erro ao processar sua solicitação de anonimização. Tente novamente mais tarde.'] } }] });
         }
-    // --- Fim da Rota de Exclusão ---
 
     } else {
-        // Rota para Intents não tratadas
         logInfo("Webhook", `Intent "${intentName}" não tratada por este webhook.`, traceContext);
         return res.json({ fulfillmentMessages: [{ text: { text: [`Intent "${intentName}" não tratada por este webhook.`] } }] });
     }
@@ -573,7 +507,6 @@ app.post('/webhook', checkAuth, async (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor do webhook rodando na porta ${PORT}`);
     
-    // Inicia as conexões com os bancos
     inicializarBanco(); // Postgres
     conectarMongo();    // MongoDB
 });
