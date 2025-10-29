@@ -3,7 +3,7 @@ const express = require('express');
 const app = express();
 const sgMail = require('@sendgrid/mail');
 const { Pool } = require('pg'); // Driver Postgres
-const { MongoClient, ServerApiVersion } = require('mongodb'); // --- [NOVO] --- Driver MongoDB
+const { MongoClient, ServerApiVersion } = require('mongodb'); // Driver MongoDB
 
 require('dotenv').config();
 
@@ -18,7 +18,7 @@ const pool = new Pool({
     }
 });
 
-// --- [NOVO] --- CONFIGURAÇÃO DO BANCO DE DADOS (MONGODB) ---
+// --- CONFIGURAÇÃO DO BANCO DE DADOS (MONGODB) ---
 const mongoUri = process.env.MONGO_URI;
 const mongoClient = new MongoClient(mongoUri, {
   serverApi: {
@@ -27,68 +27,49 @@ const mongoClient = new MongoClient(mongoUri, {
     deprecationErrors: true,
   }
 });
-let logDB; // Variável global para acessar o banco de logs
+let logDB; 
 
-/**
- * [NOVO] Conecta ao MongoDB e prepara a coleção de logs
- */
 async function conectarMongo() {
     try {
         await mongoClient.connect();
         await mongoClient.db("admin").command({ ping: 1 });
-        // O logInfo só funciona depois que o logDB é definido, então o primeiro log é no console
         console.log("Conexão com MongoDB Atlas estabelecida com sucesso!");
-        // Define o banco de dados e a coleção que vamos usar
         logDB = mongoClient.db("logs_sprint4").collection("denuncias_logs");
         logInfo("MongoDB", "Coletor de logs do MongoDB inicializado.");
     } catch (err) {
-        // Se não conseguir conectar ao Mongo, loga no console e continua
         console.error("ERRO CRÍTICO AO CONECTAR NO MONGODB:", err);
     }
 }
 // --- Fim da Configuração do MongoDB ---
 
-// --- [NOVO] --- SISTEMA DE LOGS ESTRUTURADOS (Item 3.a) ---
-/**
- * Salva um log estruturado no MongoDB (Item 1.d)
- * @param {string} level - Nível do log (INFO, ERROR, WARN)
- * @param {string} component - Onde o log se originou (ex: Postgres, SendGrid, Webhook)
- * @param {string} message - A mensagem de log
- * @param {object} context - Dados adicionais (protocolo, intent, erro, etc.)
- */
+// --- SISTEMA DE LOGS ESTRUTURADOS (Item 3.a) ---
 async function salvarLog(level, component, message, context = {}) {
     const logEntry = {
         timestamp: new Date(),
         level,
         component,
         message,
-        ...context // Adiciona protocolo, intentName, etc.
+        ...context 
     };
 
-    // 1. Imprime no console (para o log do Render)
     if (level === 'ERROR') {
         console.error(JSON.stringify(logEntry, null, 2));
     } else {
         console.log(JSON.stringify(logEntry, null, 2));
     }
 
-    // 2. Tenta salvar no MongoDB
     if (logDB) {
         try {
             await logDB.insertOne(logEntry);
         } catch (err) {
-            // Se falhar ao salvar no Mongo, loga o erro no console
             console.error("Falha ao salvar log no MongoDB:", err);
         }
     } else if (level === 'ERROR' && component !== 'MongoDB') {
-        // Se o logDB ainda não estiver pronto e o erro NÃO for do próprio Mongo
         console.error("logDB não inicializado. Log de ERRO não salvo no MongoDB.");
     }
 }
-// Funções auxiliares para facilitar o logging
 const logInfo = (component, message, context) => salvarLog('INFO', component, message, context);
 const logError = (component, message, error, context) => {
-    // Garante que o objeto de erro seja "logável"
     const errorDetails = {
         message: error.message,
         stack: error.stack,
@@ -264,14 +245,13 @@ async function salvarNoBancoPostgres(dadosTicket) {
 // --- ROTA PRINCIPAL DO WEBHOOK ---
 app.post('/webhook', async (req, res) => {
     const intentName = req.body.queryResult.intent.displayName;
-    // --- [NOVO] --- ID de Rastreio (Trace ID)
     const dialogflowSessionId = req.body.session.split('/').pop();
     let traceContext = { intentName, dialogflowSessionId };
 
     logInfo("Webhook", "Nova requisição recebida do Dialogflow", traceContext);
 
     if (intentName === 'AbrirChamadoSuporte') {
-        let protocolo; // Definido aqui para estar acessível no 'catch'
+        let protocolo; 
         try {
             // --- 1. Extração de Dados ---
             const parameters = req.body.queryResult.parameters;
@@ -281,20 +261,28 @@ app.post('/webhook', async (req, res) => {
             const prioridade = parameters.prioridade; 
             const dataOcorridoStr = parameters.data_ocorrido; 
 
+            // --- [ALTERADO] --- Lógica de busca de e-mail mais robusta
             let email = 'Não informado';
-            // Lógica de busca de e-mail corrigida
-            const contextoEmail = req.body.queryResult.outputContexts.find(ctx => ctx.name.endsWith('/contexts/email_contexto') && ctx.parameters.email);
-            if (contextoEmail) {
-                email = contextoEmail.parameters.email;
-            } else if (parameters.email) {
-                email = parameters.email; // Fallback se estiver no parâmetro direto
+            if (parameters.email && parameters.email !== '') {
+                // 1. Verifica se o e-mail foi passado como parâmetro na *própria* intent
+                email = parameters.email;
+            } else if (req.body.queryResult.outputContexts && req.body.queryResult.outputContexts.length > 0) {
+                // 2. Se não, procura em TODOS os contextos de saída
+                for (const ctx of req.body.queryResult.outputContexts) {
+                    // Verifica se o contexto tem parâmetros E se o parâmetro 'email' existe e não está vazio
+                    if (ctx.parameters && ctx.parameters.email && ctx.parameters.email !== '') {
+                        email = ctx.parameters.email;
+                        break; // Para assim que encontrar o primeiro e-mail
+                    }
+                }
             }
+            // --- Fim da alteração ---
+
             traceContext.email = email; // Adiciona e-mail ao contexto de log
 
             // --- 2. Validação de Data (Item 2.b) ---
             const dataOcorrido = new Date(dataOcorridoStr);
             const dataAgora = new Date();
-            // Comparação de data zerada (apenas dia)
             const dataOcorridoZerada = new Date(dataOcorrido).setHours(0, 0, 0, 0);
             const dataAgoraZerada = new Date(dataAgora).setHours(0, 0, 0, 0);
 
@@ -310,8 +298,8 @@ app.post('/webhook', async (req, res) => {
             }
 
             // --- 3. Lógica de Negócio e Auto-Resumo (Item 2.c) ---
-            protocolo = gerarProtocolo(); // Gera o protocolo
-            traceContext.protocolo = protocolo; // --- [NOVO] --- Adiciona o protocolo ao contexto de log
+            protocolo = gerarProtocolo(); 
+            traceContext.protocolo = protocolo; 
             
             const dataOcorridoFormatada = dataOcorrido.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
@@ -373,7 +361,7 @@ app.post('/webhook', async (req, res) => {
     
     } else if (intentName === 'consultar-status') {
         const protocolo = req.body.queryResult.parameters.protocolo;
-        traceContext.protocolo = protocolo; // Adiciona o protocolo ao log
+        traceContext.protocolo = protocolo; 
 
         if (!protocolo || protocolo.trim() === '') {
             logInfo("Webhook", "Tentativa de consulta sem protocolo.", traceContext);
@@ -404,10 +392,9 @@ app.post('/webhook', async (req, res) => {
 
 // --- INICIA O SERVIDOR ---
 app.listen(PORT, () => {
-    // [ALTERADO] - O 'listen' agora chama as duas inicializações
     console.log(`Servidor do webhook rodando na porta ${PORT}`);
     
-    // Inicia as conexões com os bancos
     inicializarBanco(); // Postgres
     conectarMongo();    // MongoDB
 });
+
