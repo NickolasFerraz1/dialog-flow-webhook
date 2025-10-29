@@ -102,13 +102,26 @@ function gerarProtocolo() {
     return `SUP-${ano}${mes}${dia}-${aleatorio}`;
 }
 
+// --- [ALTERADO] --- Função de envio de e-mail mais segura
 async function enviarTicketPorEmail(dadosTicket) {
     console.log("--- INICIANDO ENVIO DE E-MAIL VIA SENDGRID (Item 1.a) ---");
     const dataOcorridoFormatada = new Date(dadosTicket.data_ocorrido).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
+    // --- [NOVO] --- Lógica de segurança para destinatários
+    // Começa com o e-mail fixo do suporte
+    const toList = ['ct.sprint4@gmail.com']; 
+    // Adiciona o e-mail do cliente APENAS se ele for válido (contém @)
+    if (dadosTicket.email && dadosTicket.email.includes('@')) {
+        toList.push(dadosTicket.email);
+        console.log(`Email do cliente ('${dadosTicket.email}') é válido. Adicionando à lista de destinatários.`);
+    } else {
+        console.warn(`Email do cliente ('${dadosTicket.email}') é inválido ou não informado. Envio será feito apenas para o suporte.`);
+    }
+    // --- Fim da Lógica de segurança ---
+
     const msg = {
         from: { email: 'ct.sprint4@gmail.com', name: 'Bot de Suporte' },
-        to: ['ct.sprint4@gmail.com', dadosTicket.email],
+        to: toList, // --- [ALTERADO] --- Usa a lista segura
         subject: `Novo Chamado: ${dadosTicket.protocolo} - ${dadosTicket.descricao.substring(0, 30)}...`,
         html: `
         <h3>Novo Chamado Aberto via Chatbot</h3>
@@ -209,28 +222,21 @@ app.post('/webhook', async (req, res) => {
 
             let email = 'Não informado';
             // --- [CORREÇÃO] --- Buscando o e-mail do contexto corretamente
-            const contextoEmail = req.body.queryResult.outputContexts.find(ctx => ctx.name.endsWith('/parameters/email'));
+            // Procura em TODOS os contextos por um que tenha o parâmetro 'email'
+            const contextoEmail = req.body.queryResult.outputContexts.find(ctx => ctx.parameters && ctx.parameters.email);
             if (contextoEmail) {
                 email = contextoEmail.parameters.email;
-            } else {
-                // Tenta pegar do parâmetro, caso o contexto falhe (backup)
-                if (parameters.email) email = parameters.email;
+            } else if (parameters.email) {
+                // Tenta pegar do parâmetro da intent ATUAL (backup)
+                email = parameters.email;
             }
             // --- Fim da Correção ---
 
-            // --- [ALTERADO] --- Item 2.b: Lógica de Validação de Data Corrigida
+            // --- Validação de Data (Item 2.b) ---
             const dataOcorrido = new Date(dataOcorridoStr);
             const dataAgora = new Date();
-
-            // Zeramos a hora, minutos e segundos de AMBAS as datas para comparar
-            // apenas o DIA, não a HORA.
             const dataOcorridoZerada = new Date(dataOcorrido).setHours(0, 0, 0, 0);
             const dataAgoraZerada = new Date(dataAgora).setHours(0, 0, 0, 0);
-
-            // Agora, "hoje" (meio-dia) > "agora" (10h) se torna
-            // "hoje" (meia-noite) > "hoje" (meia-noite) -> false (Correto)
-            // E "amanhã" (meio-dia) > "agora" (10h) se torna
-            // "amanhã" (meia-noite) > "hoje" (meia-noite) -> true (Correto)
 
             if (dataOcorridoZerada > dataAgoraZerada) {
                 console.log(`Validação falhou: Data do ocorrido (${dataOcorridoStr}) está no futuro.`);
@@ -272,11 +278,13 @@ app.post('/webhook', async (req, res) => {
                 const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. O status atual é: ${statusInicial}. Uma confirmação foi enviada para ${email}.`;
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
             } else {
-                throw new Error("Falha ao salvar no banco ou enviar e-mail de confirmação.");
+                // Se falhou, descobre qual falhou
+                if (!salvoNoBanco) throw new Error("Falha ao salvar no banco de dados.");
+                if (!emailEnviado) throw new Error("Falha ao enviar e-mail de confirmação.");
             }
         } catch (error) {
             console.error("Erro ao processar webhook (AbrirChamadoSuporte):", error);
-            return res.json({ fulfillmentMessages: [{ text: { text: ['Desculpe, ocorreu um erro interno. Nossa equipe já foi notificada.'] } }] });
+            return res.json({ fulfillmentMessages: [{ text: { text: [`Desculpe, ocorreu um erro interno. Nossa equipe já foi notificada. (${error.message})`] } }] });
         }
     
     } else if (intentName === 'consultar-status') {
