@@ -91,6 +91,7 @@ async function conectarMongo() {
 async function salvarLog(level, component, message, context = {}) {
     // --- Mascaramento de PII para Logs (Item 3.c) ---
     const maskedContext = { ...context }; 
+    // [CORREÇÃO] Adicionado 'uf' à lista de chaves, embora o mascaramento de PII só afete CPF/CNPJ
     const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema', 'uf']; 
 
     for (const key of sensitiveKeys) {
@@ -423,8 +424,12 @@ app.post('/webhook', checkAuth, async (req, res) => {
                     }
                 }
             }
-            // Adiciona PII ao contexto de log (será mascarado pelo salvarLog)
+            // --- [CORREÇÃO] --- Adiciona todos os campos ao traceContext principal
             traceContext.email = email; 
+            traceContext.nome = nome;
+            traceContext.uf = uf; // <-- CORREÇÃO: Adiciona UF ao log
+            traceContext.descricao_problema = descricaoProblema; // <-- CORREÇÃO: Adiciona descrição ao log
+            // --- Fim da Correção ---
 
             // --- 2. Validação de Data (Item 2.b) ---
             const dataOcorrido = new Date(dataOcorridoStr);
@@ -473,11 +478,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
             <p>${descricaoProblema}</p>
             `;
             
-            // --- [CORREÇÃO] ---
-            // Readiciona PII (nome e descrição) ao contexto ANTES de logar
-            traceContext.nome = nome;
-            traceContext.descricao_problema = descricaoProblema;
-            logInfo("Webhook", "Auto-resumo e lógica de negócio concluídos", { ...traceContext, uf });
+            logInfo("Webhook", "Auto-resumo e lógica de negócio concluídos", traceContext);
 
             // --- 4. Preparando Dados e Executando Ações ---
             const dadosTicket = { 
@@ -502,7 +503,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
             // --- 5. Resposta Final ---
             if (emailEnviado && salvoNoBanco) {
                 const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. O status atual é: ${statusInicial}. Uma confirmação foi enviada para ${email}.`;
-                // Este log final também terá o nome mascarado no Mongo
+                // Este log final também terá os campos mascarados no Mongo
                 logInfo("Webhook", "Fluxo 'AbrirChamadoSuporte' concluído com sucesso.", traceContext);
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
             } else {
