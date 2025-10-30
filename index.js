@@ -390,9 +390,8 @@ app.post('/webhook', checkAuth, async (req, res) => {
     
     const intentName = req.body.queryResult.intent.displayName;
     const dialogflowSessionId = req.body.session.split('/').pop();
-    // --- [ALTERAÇÃO] --- Captura o queryText para os logs
     const queryText = req.body.queryResult.queryText; 
-    let traceContext = { intentName, dialogflowSessionId, queryText }; // <-- queryText adicionado
+    let traceContext = { intentName, dialogflowSessionId, queryText }; 
 
     logInfo("Webhook", "Nova requisição recebida (pós-autenticação/rate-limit)", traceContext);
 
@@ -403,17 +402,13 @@ app.post('/webhook', checkAuth, async (req, res) => {
             // --- 1. Extração de Dados ---
             const parameters = req.body.queryResult.parameters;
             const nomeParam = parameters.nome;
-            // [REFINAMENTO] Capitaliza o nome
             const nome = capitalize((nomeParam && nomeParam.name) ? nomeParam.name : (nomeParam || 'Não informado'));
             
             const descricaoProblema = parameters.descricao_problema;
             const prioridade = parameters.prioridade; 
             const dataOcorridoStr = parameters.data_ocorrido; 
-            
-            // [REFINAMENTO] Coloca a UF em maiúsculas
-            const uf = parameters.uf ? parameters.uf.toUpperCase() : 'N/I'; // N/I = Não Informado
+            const uf = parameters.uf ? parameters.uf.toUpperCase() : 'N/I'; 
 
-            // Lógica de busca de e-mail robusta
             let email = 'Não informado';
             if (parameters.email && parameters.email !== '') {
                 email = parameters.email;
@@ -453,23 +448,20 @@ app.post('/webhook', checkAuth, async (req, res) => {
             protocolo = gerarProtocolo(); 
             traceContext.protocolo = protocolo; 
             
-            // [REFINAMENTO] Usa toLocaleDateString para remover o horário
             const dataOcorridoFormatada = dataOcorrido.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
-            // Item 2.a: Human-in-the-loop
             let statusInicial = 'Recebido'; 
             if (prioridade && prioridade.toLowerCase() === 'alta') {
                 statusInicial = 'Revisão Pendente'; 
             }
 
-            // Item 2.c: Título e Descrição Padronizada
             const tituloTicket = `Denúncia: ${descricaoProblema.substring(0, 40)}...`;
             const descricaoPadronizada = `
             <h3>Resumo da Denúncia (Protocolo: ${protocolo})</h3>
             <ul>
                 <li><strong>Denunciante:</strong> ${nome}</li>
                 <li><strong>E-mail:</strong> ${email}</li>
-                <li><strong>Data do Ocorrido:</strong> ${dataOcorridoFormatada}</li> <!-- Horário removido -->
+                <li><strong>Data do Ocorrido:</strong> ${dataOcorridoFormatada}</li> 
                 <li><strong>UF do Ocorrido:</strong> ${uf}</li>
                 <li><strong>Prioridade:</strong> ${prioridade}</li>
                 <li><strong>Status Inicial:</strong> ${statusInicial}</li>
@@ -495,16 +487,15 @@ app.post('/webhook', checkAuth, async (req, res) => {
             };
 
             if (statusInicial === 'Revisão Pendente') {
-                await enviarNotificacaoAntifraude(dadosTicket); // Item 1.c
+                await enviarNotificacaoAntifraude(dadosTicket); 
             }
             
-            const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket); // Item 1.d
-            const emailEnviado = await enviarTicketPorEmail(dadosTicket); // Item 1.a
+            const salvoNoBanco = await salvarNoBancoPostgres(dadosTicket); 
+            const emailEnviado = await enviarTicketPorEmail(dadosTicket); 
             
             // --- 5. Resposta Final ---
             if (emailEnviado && salvoNoBanco) {
                 const mensagemConfirmacao = `Ok, ${nome}! Sua denúncia foi registrada com sucesso sob o protocolo ${protocolo}. O status atual é: ${statusInicial}. Uma confirmação foi enviada para ${email}.`;
-                // Este log final também terá os campos mascarados no Mongo
                 logInfo("Webhook", "Fluxo 'AbrirChamadoSuporte' concluído com sucesso.", traceContext);
                 return res.json({ fulfillmentMessages: [{ text: { text: [mensagemConfirmacao] } }] });
             } else {
@@ -526,7 +517,6 @@ app.post('/webhook', checkAuth, async (req, res) => {
             return res.json({ fulfillmentMessages: [{ text: { text: ['Não entendi o número do protocolo. Poderia repetir?'] } }] });
         }
         try {
-            // Item 1.b: Consulta de status
             const query = 'SELECT status FROM denuncias WHERE protocolo = $1';
             const result = await pool.query(query, [protocolo]);
             let responseText = '';
@@ -544,7 +534,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
             return res.json({ fulfillmentMessages: [{ text: { text: ['Ocorreu um erro ao consultar o status. Tente novamente mais tarde.'] } }] });
         }
 
-    // --- ROTA: excluir-dados (Item 3.c) ---
+    // --- ROTA: excluir-dados ---
     } else if (intentName === 'excluir-dados') { 
         const protocolo = req.body.queryResult.parameters.protocolo;
         traceContext.protocolo = protocolo; 
@@ -572,7 +562,6 @@ app.post('/webhook', checkAuth, async (req, res) => {
             const result = await pool.query(query, [protocolo]);
             let responseText = '';
 
-            // result.rowCount informa quantas linhas foram afetadas
             if (result.rowCount > 0) {
                 responseText = `Processo concluído. Os dados pessoais associados ao protocolo ${protocolo} foram permanentemente anonimizados.`;
                 logInfo("Webhook", `Anonimização do protocolo ${protocolo} concluída com sucesso.`, traceContext);
@@ -587,9 +576,24 @@ app.post('/webhook', checkAuth, async (req, res) => {
             logError("Webhook", "Erro ao anonimizar dados no banco (excluir-dados)", error, traceContext);
             return res.json({ fulfillmentMessages: [{ text: { text: ['Ocorreu um erro ao processar sua solicitação de anonimização. Tente novamente mais tarde.'] } }] });
         }
-    // --- Fim da Rota de Exclusão ---
-
-    // --- [NOVO] --- ROTA: Default Fallback Intent (Item 4.d) ---
+    
+    // --- [NOVO] --- ROTA: falar-com-atendente (Item 4.b - Métrica de Escalonamento) ---
+    } else if (intentName === 'falar-com-atendente') {
+        logInfo("Webhook", "Solicitação de escalonamento (falar com atendente) recebida.", traceContext);
+        
+        // Esta é a nossa "métrica de escalonamento". O log no MongoDB é o entregável.
+        // Respondemos ao usuário com a mensagem de simulação.
+        return res.json({ 
+            fulfillmentMessages: [{ 
+                text: { text: [
+                    'Entendido. Estou registrando sua solicitação para falar com um atendente.',
+                    'No momento, nosso atendimento humano está disponível através do e-mail suporte@empresa.com. Para continuar via bot, basta dizer "abrir denúncia".'
+                ]} 
+            }] 
+        });
+    // --- Fim da Rota de Escalonamento ---
+    
+    // --- ROTA: Default Fallback Intent (Item 4.d) ---
     } else if (intentName === 'Default Fallback Intent') {
         // Esta é a nossa "Coleta de Frases de Fallback" (Item 4.d)
         // O logInfo principal (linha 310) já salvou o queryText no MongoDB.
