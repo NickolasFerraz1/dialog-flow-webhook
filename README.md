@@ -62,8 +62,11 @@ Existem 3 fluxos principais que podem ser testados:
 
 ---
 
-## 3. Configuração (`.env.example`)
+## 3. Configuração de Segurança e Políticas (Item 3.b)
 
+Esta seção detalha o "Pacote de Configuração" de segurança implementado.
+
+### 3.1. Variáveis de Ambiente (`.env.example`)
 Para rodar este projeto, as seguintes variáveis de ambiente são necessárias. Crie um arquivo `.env` na raiz do projeto com base neste exemplo:
 
 ```.env
@@ -84,28 +87,12 @@ WEBHOOK_USER=meu_usuario_secreto
 WEBHOOK_PASS=minha_senha_secreta
 ```
 
---- 
-
-## 4. Configuração de Segurança e Políticas (Item 3.b)
-
-Esta seção detalha o "Pacote de Configuração" de segurança implementado.
-
-### 4.1. Variáveis de Ambiente (`.env.example`)
-As seguintes variáveis de ambiente são necessárias para a operação do serviço. O arquivo `.env.example` na raiz do projeto serve como template.
-
-* `DATABASE_URL`: String de conexão para o banco de dados **PostgreSQL** (operacional).
-* `MONGO_URI`: String de conexão para o banco de dados **MongoDB Atlas** (logs).
-* `SENDGRID_API_KEY`: Chave de API para o serviço de e-mail SendGrid.
-* `ANTIFRAUDE_EMAIL`: E-mail da equipe de risco que recebe alertas de alta prioridade.
-* `WEBHOOK_USER`: Nome de usuário para a autenticação do webhook.
-* `WEBHOOK_PASS`: Senha para a autenticação do webhook.
-
-### 4.2. Política de Autenticação de Webhooks
+### 3.2. Política de Autenticação de Webhooks
 * **Método:** Autenticação Básica (`Basic Auth`).
 * **Implementação:** O Dialogflow é configurado (em `Fulfillment > Headers`) para enviar as credenciais `WEBHOOK_USER` e `WEBHOOK_PASS`.
 * **Proteção:** O backend (`index.js`) usa o middleware `checkAuth`, que intercepta **todas** as requisições. Ele decodifica o cabeçalho `Authorization` e o compara com as variáveis de ambiente. Requisições sem credenciais válidas são bloqueadas com um erro `401 Unauthorized` e logadas no MongoDB.
 
-### 4.3. Política de Rate-Limit
+### 3.3. Política de Rate-Limit
 * **Método:** Limitação de taxa por IP, usando a biblioteca `express-rate-limit`.
 * **Implementação:** O middleware `limiter` é aplicado a **todas** as rotas do servidor.
 * **Política:** A política definida no `index.js` é: **100 requisições a cada 15 minutos por IP**.
@@ -113,7 +100,7 @@ As seguintes variáveis de ambiente são necessárias para a operação do servi
 
 ---
 
-## 5. Regras de Risco e Política de Privacidade
+## 4. Regras de Risco e Política de Privacidade
 
 ### Regras de Risco e Escalonamento (Item 2.a)
 
@@ -130,7 +117,7 @@ As seguintes variáveis de ambiente são necessárias para a operação do servi
 
 ---
 
-## 6. Metas de Qualidade e Painel (Seção 4)
+## 5. Metas de Qualidade e Painel (Seção 4)
 
 * **Metas (Piloto):**
     * Taxa de Fallback (Fallback Rate): `< 15%`
