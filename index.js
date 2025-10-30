@@ -91,8 +91,8 @@ async function conectarMongo() {
 async function salvarLog(level, component, message, context = {}) {
     // --- Mascaramento de PII para Logs (Item 3.c) ---
     const maskedContext = { ...context }; 
-    // [CORREÇÃO] Adicionado 'uf' à lista de chaves, embora o mascaramento de PII só afete CPF/CNPJ
-    const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema', 'uf']; 
+    // [ALTERAÇÃO] Adicionado 'data_ocorrido' à lista
+    const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema', 'uf', 'data_ocorrido']; 
 
     for (const key of sensitiveKeys) {
         if (maskedContext[key] && typeof maskedContext[key] === 'string') {
@@ -427,8 +427,9 @@ app.post('/webhook', checkAuth, async (req, res) => {
             // --- [CORREÇÃO] --- Adiciona todos os campos ao traceContext principal
             traceContext.email = email; 
             traceContext.nome = nome;
-            traceContext.uf = uf; // <-- CORREÇÃO: Adiciona UF ao log
-            traceContext.descricao_problema = descricaoProblema; // <-- CORREÇÃO: Adiciona descrição ao log
+            traceContext.uf = uf; 
+            traceContext.descricao_problema = descricaoProblema; 
+            traceContext.data_ocorrido = dataOcorridoStr; // <-- [ALTERAÇÃO] Adiciona data ao log
             // --- Fim da Correção ---
 
             // --- 2. Validação de Data (Item 2.b) ---
