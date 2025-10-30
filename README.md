@@ -125,5 +125,6 @@ WEBHOOK_PASS=minha_senha_secreta
     * SLA de Notificação (Alta Prioridade): `< 5 minutos`
 
 * **Painel de Monitoramento (Item 4.c):**
-    * (O painel será criado no Google Looker Studio, conectando-se ao banco de dados PostgreSQL).
-    * *Link do Painel:* `(Link a ser adicionado)`
+    * O painel foi criado utilizando streamlit (app.py), conectando-se ao banco de dados PostgreSQL e MongoDB.
+    * *Link do painel:* [https://dialog-flow-webhook.streamlit.app/](https://dialog-flow-webhook.streamlit.app/)
+      
