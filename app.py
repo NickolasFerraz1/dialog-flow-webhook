@@ -15,6 +15,35 @@ try:
 except ImportError:
     pass  # dotenv not available, will use system env vars only
 
+# Helper to read configuration values first from environment, then from
+# Streamlit secrets (so the same code works locally with .env or in
+# Streamlit Cloud with st.secrets).
+def get_config(key, default=None):
+    """Return configuration value from environment or Streamlit secrets.
+
+    Priority: os.environ -> st.secrets -> default
+    """
+    # 1) check OS environment
+    val = os.environ.get(key)
+    if val is not None and val != '':
+        return val
+
+    # 2) check Streamlit secrets (works on Streamlit Cloud)
+    try:
+        # st.secrets works like a dict; it may contain nested dicts
+        if key in st.secrets:
+            return st.secrets[key]
+
+        # try to find the key inside nested sections (e.g., [postgres])
+        for v in st.secrets.values():
+            if isinstance(v, dict) and key in v:
+                return v[key]
+    except Exception:
+        # if streamlit isn't available or secrets missing, ignore
+        pass
+
+    return default
+
 # Optional DB connectors
 try:
     from pymongo import MongoClient
@@ -29,7 +58,7 @@ except Exception:
 
 def load_mongodb_logs():
     """Carrega logs do MongoDB para análise de conversação"""
-    mongo_uri = os.environ.get("MONGO_URI")
+    mongo_uri = get_config("MONGO_URI")
     if not mongo_uri or MongoClient is None:
         return pd.DataFrame()
     
@@ -76,7 +105,7 @@ def combine_postgres_and_mongo_data():
     print("🔄 Iniciando carregamento combinado de dados...")
     
     # 1. Carregar denúncias do Postgres (dados estruturados de negócio)
-    database_url = os.environ.get('DATABASE_URL')
+    database_url = get_config('DATABASE_URL')
     pg_data = pd.DataFrame()
     
     if database_url and create_engine is not None:
