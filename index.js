@@ -256,6 +256,19 @@ function gerarProtocolo() {
     return `SUP-${ano}${mes}${dia}-${aleatorio}`;
 }
 
+// --- [REFINAMENTO] --- Função auxiliar de capitalização
+/**
+ * Capitaliza a primeira letra de uma string e força o resto para minúsculas.
+ * @param {string} str A string para capitalizar
+ * @returns {string} A string formatada
+ */
+function capitalize(str) {
+    if (typeof str !== 'string' || !str) return str;
+    // Pega a primeira letra, coloca em maiúscula, e concatena com o resto da string em minúscula
+    return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
+}
+
+
 /**
  * [ITEM 1.a] Envia o ticket/denúncia por e-mail para o cliente e suporte.
  */
@@ -388,11 +401,15 @@ app.post('/webhook', checkAuth, async (req, res) => {
             // --- 1. Extração de Dados ---
             const parameters = req.body.queryResult.parameters;
             const nomeParam = parameters.nome;
-            const nome = (nomeParam && nomeParam.name) ? nomeParam.name : (nomeParam || 'Não informado');
+            // [REFINAMENTO] Capitaliza o nome
+            const nome = capitalize((nomeParam && nomeParam.name) ? nomeParam.name : (nomeParam || 'Não informado'));
+            
             const descricaoProblema = parameters.descricao_problema;
             const prioridade = parameters.prioridade; 
             const dataOcorridoStr = parameters.data_ocorrido; 
-            const uf = parameters.uf; 
+            
+            // [REFINAMENTO] Coloca a UF em maiúsculas
+            const uf = parameters.uf ? parameters.uf.toUpperCase() : 'N/I'; // N/I = Não Informado
 
             // Lógica de busca de e-mail robusta
             let email = 'Não informado';
@@ -430,7 +447,8 @@ app.post('/webhook', checkAuth, async (req, res) => {
             protocolo = gerarProtocolo(); 
             traceContext.protocolo = protocolo; 
             
-            const dataOcorridoFormatada = dataOcorrido.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+            // [REFINAMENTO] Usa toLocaleDateString para remover o horário
+            const dataOcorridoFormatada = dataOcorrido.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
             // Item 2.a: Human-in-the-loop
             let statusInicial = 'Recebido'; 
@@ -445,7 +463,7 @@ app.post('/webhook', checkAuth, async (req, res) => {
             <ul>
                 <li><strong>Denunciante:</strong> ${nome}</li>
                 <li><strong>E-mail:</strong> ${email}</li>
-                <li><strong>Data do Ocorrido:</strong> ${dataOcorridoFormatada}</li>
+                <li><strong>Data do Ocorrido:</strong> ${dataOcorridoFormatada}</li> <!-- Horário removido -->
                 <li><strong>UF do Ocorrido:</strong> ${uf}</li>
                 <li><strong>Prioridade:</strong> ${prioridade}</li>
                 <li><strong>Status Inicial:</strong> ${statusInicial}</li>
@@ -455,8 +473,8 @@ app.post('/webhook', checkAuth, async (req, res) => {
             <p>${descricaoProblema}</p>
             `;
             
-            // --- [A CORREÇÃO ESTÁ AQUI] ---
-            // Adiciona PII (nome e descrição) ao contexto ANTES de logar
+            // --- [CORREÇÃO] ---
+            // Readiciona PII (nome e descrição) ao contexto ANTES de logar
             traceContext.nome = nome;
             traceContext.descricao_problema = descricaoProblema;
             logInfo("Webhook", "Auto-resumo e lógica de negócio concluídos", { ...traceContext, uf });
@@ -524,8 +542,8 @@ app.post('/webhook', checkAuth, async (req, res) => {
             return res.json({ fulfillmentMessages: [{ text: { text: ['Ocorreu um erro ao consultar o status. Tente novamente mais tarde.'] } }] });
         }
 
-    // --- ROTA: excluir-meus-dados (Item 3.c) ---
-    } else if (intentName === 'excluir-dados') {
+    // --- ROTA: excluir-dados (Item 3.c) ---
+    } else if (intentName === 'excluir-dados') { 
         const protocolo = req.body.queryResult.parameters.protocolo;
         traceContext.protocolo = protocolo; 
 
@@ -584,4 +602,3 @@ app.listen(PORT, () => {
     inicializarBanco(); // Postgres
     conectarMongo();    // MongoDB
 });
-
