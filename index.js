@@ -91,8 +91,8 @@ async function conectarMongo() {
 async function salvarLog(level, component, message, context = {}) {
     // --- Mascaramento de PII para Logs (Item 3.c) ---
     const maskedContext = { ...context }; 
-    // [ALTERAÇÃO] Adicionado 'data_ocorrido' à lista
-    const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema', 'uf', 'data_ocorrido']; 
+    // [ALTERAÇÃO] Adicionado 'queryText' às chaves sensíveis
+    const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema', 'uf', 'data_ocorrido', 'queryText']; 
 
     for (const key of sensitiveKeys) {
         if (maskedContext[key] && typeof maskedContext[key] === 'string') {
@@ -391,7 +391,9 @@ app.post('/webhook', checkAuth, async (req, res) => {
     
     const intentName = req.body.queryResult.intent.displayName;
     const dialogflowSessionId = req.body.session.split('/').pop();
-    let traceContext = { intentName, dialogflowSessionId };
+    // --- [ALTERAÇÃO] --- Captura o queryText para os logs
+    const queryText = req.body.queryResult.queryText; 
+    let traceContext = { intentName, dialogflowSessionId, queryText }; // <-- queryText adicionado
 
     logInfo("Webhook", "Nova requisição recebida (pós-autenticação/rate-limit)", traceContext);
 
@@ -424,13 +426,12 @@ app.post('/webhook', checkAuth, async (req, res) => {
                     }
                 }
             }
-            // --- [CORREÇÃO] --- Adiciona todos os campos ao traceContext principal
+            
             traceContext.email = email; 
             traceContext.nome = nome;
             traceContext.uf = uf; 
             traceContext.descricao_problema = descricaoProblema; 
-            traceContext.data_ocorrido = dataOcorridoStr; // <-- [ALTERAÇÃO] Adiciona data ao log
-            // --- Fim da Correção ---
+            traceContext.data_ocorrido = dataOcorridoStr; 
 
             // --- 2. Validação de Data (Item 2.b) ---
             const dataOcorrido = new Date(dataOcorridoStr);
@@ -604,3 +605,4 @@ app.listen(PORT, () => {
     inicializarBanco(); // Postgres
     conectarMongo();    // MongoDB
 });
+
