@@ -82,3 +82,33 @@ ANTIFRAUDE_EMAIL=email-da-equipe@empresa.com
 # Credenciais de Segurança do Webhook (Item 3.b)
 WEBHOOK_USER=meu_usuario_secreto
 WEBHOOK_PASS=minha_senha_secreta
+
+---
+
+## 4. Regras de Risco e Política de Privacidade
+
+### Regras de Risco e Escalonamento (Item 2.a)
+
+* A regra de risco é definida pelo parâmetro **`prioridade`** coletado pelo bot.
+* Se `prioridade` for `Alta`:
+    1.  O status inicial da denúncia no Postgres é definido como **"Revisão Pendente"** (criando a fila de human-in-the-loop).
+    2.  Uma notificação de alerta imediata (Item 1.c) é enviada via SendGrid para o e-mail definido em `ANTIFRAUDE_EMAIL`.
+* Se a `prioridade` for `Média` ou `Baixa`, o status inicial é **"Recebido"** e nenhum alerta é enviado.
+
+### Política de Privacidade e Anonimização (Item 3.c)
+
+* **Mascaramento de PII:** Dados sensíveis (CPF/CNPJ) encontrados na conversação são mascarados (ex: `123.***.***-00`) ANTES de serem salvos nos logs do **MongoDB**. Os dados permanecem completos no **Postgres** (operacional) e nos e-mails (para a equipe de revisão).
+* **Direito ao Esquecimento:** O processo é iniciado pela intent `excluir-dados`. O backend executa um `UPDATE` no Postgres, substituindo dados pessoais (`nome`, `email`, `descricao`, `titulo`, `uf`) pelo valor literal `[ANONIMIZADO]`. Esta ação é irreversível.
+
+---
+
+## 5. Metas de Qualidade e Painel (Seção 4)
+
+* **Metas (Piloto):**
+    * Taxa de Fallback (Fallback Rate): `< 15%`
+    * Taxa de Preenchimento (Slot Fill): `> 85%`
+    * SLA de Notificação (Alta Prioridade): `< 5 minutos`
+
+* **Painel de Monitoramento (Item 4.c):**
+    * (O painel será criado no Google Looker Studio, conectando-se ao banco de dados PostgreSQL).
+    * *Link do Painel:* `(Link a ser adicionado)`
