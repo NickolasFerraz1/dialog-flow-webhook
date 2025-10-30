@@ -126,5 +126,5 @@ WEBHOOK_PASS=minha_senha_secreta
 
 * **Painel de Monitoramento (Item 4.c):**
     * O painel foi criado utilizando streamlit (app.py), conectando-se ao banco de dados PostgreSQL e MongoDB.
-    * *[Link do painel:* [https://dialog-flow-webhook.streamlit.app/](https://dialog-flow-webhook.streamlit.app/)
+    * *Link do painel:* [https://dialog-flow-webhook.streamlit.app/](https://dialog-flow-webhook.streamlit.app/)
       
