@@ -130,4 +130,97 @@ WEBHOOK_PASS=minha_senha_secreta
 * **Painel de Monitoramento (Item 4.c):**
     * O painel foi criado utilizando streamlit (app.py), conectando-se ao banco de dados PostgreSQL e MongoDB.
     * *Link do painel:* [https://dialog-flow-webhook.streamlit.app/](https://dialog-flow-webhook.streamlit.app/)
-      
+
+
+# Painel de Monitoramento (B.I.) - Chatbot de Denúncias (Streamlit)
+
+Este é o código para o painel de Business Intelligence (B.I.) da Sprint 4, construído com **Streamlit**. O objetivo deste painel é visualizar as métricas de negócio e de performance do chatbot, conectando-se diretamente às fontes de dados (PostgreSQL e MongoDB) que populamos.
+
+---
+
+## 🚀 Funcionalidades Principais
+
+* **Dashboard Interativo:** Apresenta os dados em duas abas principais: "Dashboard Principal" (com métricas de negócio do Postgres) e "Análise de Logs MongoDB" (com métricas de conversação).
+* **Filtros Dinâmicos:** Permite filtrar os dados por período (data), canal, UF e prioridade.
+* **Métricas de Negócio (Item 4.b):**
+    * Gráficos de denúncias por UF e por Canal.
+    * Visualização da distribuição de prioridades e o percentual de "Alta Prioridade".
+* **Métricas do Bot (Item 4.a):**
+    * KPIs principais como Taxa de Fallback, Taxa de Preenchimento (Slot Fill), Taxa de Escalonamento, etc.
+    * Visualização das frases que causaram fallback para o ciclo de melhoria (Item 4.d).
+* **Exportação de Dados (Item 4.c):** Botões para download dos dados filtrados em formato `.csv` e dos gráficos em `.png`.
+
+---
+
+## ⚙️ Como Funciona: A Lógica de Dados
+
+O código foi projetado para ser resiliente e funcionar em diferentes cenários. A ordem de carregamento dos dados é a seguinte:
+
+1.  **Primeiro, tenta carregar um arquivo `logs.csv` local.** Isso é útil para testes rápidos e desenvolvimento offline.
+2.  **Se não encontrar o CSV, ele tenta se conectar às fontes de dados reais:**
+    * Conecta-se ao **PostgreSQL** no Render para buscar os dados das denúncias (a "fonte da verdade").
+    * Conecta-se ao **MongoDB Atlas** para buscar os logs de conversação.
+    * Ele **combina** as duas fontes, enriquecendo os dados do Postgres com informações dos logs (como `fallback_phrase` e `notification_sent_at`).
+3.  **Se nenhuma fonte de dados real for encontrada** (por exemplo, se as credenciais estiverem faltando), ele gera **dados sintéticos (falsos)** para que o painel possa ser visualizado sem quebrar.
+
+---
+
+## 🛠️ Como Executar o Painel
+
+### 1. Dependências
+
+Certifique-se de que as bibliotecas Python necessárias estão instaladas. Você pode criar um arquivo `requirements.txt` com o seguinte conteúdo:
+
+```txt
+streamlit
+pandas
+numpy
+altair
+matplotlib
+python-dotenv
+sqlalchemy
+pymongo
+psycopg2-binary
+```
+E instalar com: pip install -r requirements.txt
+
+## 2. Configuração
+
+O painel precisa das mesmas credenciais que o seu backend.
+
+### Para rodar localmente (no seu PC):
+1.  Crie um arquivo `.env` na mesma pasta do script.
+2.  Adicione as mesmas variáveis de ambiente do seu backend, mas use a **URL Externa** do Postgres:
+    ```.env
+    DATABASE_URL=postgres://... (Sua URL EXTERNA do Postgres)
+    MONGO_URI=mongodb+srv://... (Sua URL do MongoDB)
+    ```
+
+### Para publicar no Streamlit Cloud:
+1.  Vá nas configurações do seu app no Streamlit Cloud.
+2.  Adicione as mesmas variáveis como "Secrets", no seguinte formato:
+    ```toml
+    DATABASE_URL="postgres://..."
+    MONGO_URI="mongodb+srv://..."
+    ```
+
+---
+
+## 3. Executando o Painel
+
+Abra o terminal na pasta do projeto e execute:
+```bash
+streamlit run seu_arquivo.py
+```
+(Substitua seu_arquivo.py pelo nome do seu script).
+
+## 4. Estrutura do Código (Funções Principais)
+
+* **`main()`**: Função principal que configura a página e as abas do painel.
+* **`load_or_generate_data()`**: Orquestra a lógica de carregamento de dados, decidindo entre usar um `logs.csv` local, conectar-se aos bancos de dados reais ou, como último recurso, gerar dados sintéticos.
+* **`combine_postgres_and_mongo_data()`**: O "coração" da aplicação. Une as informações das denúncias (do Postgres) com os logs de conversação (do MongoDB).
+* **`load_denuncias_from_postgres()`**: Conecta e busca os dados da tabela `denuncias` no PostgreSQL.
+* **`load_mongodb_logs()`**: Conecta e busca os logs da coleção `denuncias_logs` no MongoDB Atlas.
+* **`compute_metrics()`**: Pega o dataframe final e calcula todas as métricas da Sprint 4 (taxa de fallback, % alta prioridade, etc.).
+* **`show_main_dashboard()`**: Renderiza todos os gráficos e KPIs da aba principal, focada nos dados de negócio do Postgres.
+* **`show_mongodb_analysis()`**: Renderiza a aba de análise de logs, focada nos dados de conversação do MongoDB.
