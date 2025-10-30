@@ -5,6 +5,7 @@ import altair as alt
 import matplotlib.pyplot as plt
 import io
 import os
+import json
 from datetime import datetime, timedelta
 import logging
 
@@ -43,6 +44,46 @@ def get_config(key, default=None):
         pass
 
     return default
+
+
+def sanitize_for_streamlit(df: pd.DataFrame, max_rows: int | None = None) -> pd.DataFrame:
+    """Return a copy of df safe to pass to Streamlit (convert non-JSON-serializable
+    object columns to strings). Optionally limit rows with max_rows.
+    """
+    if df is None or df.empty:
+        return df.copy()
+
+    out = df.copy()
+    if max_rows is not None:
+        out = out.head(max_rows).copy()
+
+    def _safe_serialize(x):
+        # keep NaN/None
+        if pd.isna(x):
+            return x
+        # common primitives and datetimes — keep as-is
+        if isinstance(x, (str, int, float, bool, pd.Timestamp, datetime, timedelta)):
+            return x
+        # lists/dicts/other objects -> try JSON, fallback to str
+        try:
+            return json.dumps(x, default=str, ensure_ascii=False)
+        except Exception:
+            try:
+                return str(x)
+            except Exception:
+                return repr(x)
+
+    for col in out.columns:
+        if out[col].dtype == 'object':
+            # apply safe serializer only if there is some non-primitive value
+            if out[col].apply(lambda v: not (pd.isna(v) or isinstance(v, (str, int, float, bool, pd.Timestamp, datetime, timedelta)))).any():
+                out[col] = out[col].apply(_safe_serialize)
+
+    # ensure datetimes are converted to strings to avoid timezone/pyarrow issues
+    for dt_col in out.select_dtypes(include=['datetime64[ns]', 'datetimetz']).columns:
+        out[dt_col] = out[dt_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    return out
 
 # Optional DB connectors
 try:
@@ -743,7 +784,8 @@ def show_mongodb_analysis(df):
             
             # Raw data
             with st.expander("🔍 Visualizar Logs Brutos"):
-                st.dataframe(mongo_logs.head(50))
+                safe_logs = sanitize_for_streamlit(mongo_logs, max_rows=50)
+                st.dataframe(safe_logs)
         
         else:
             st.warning("Nenhum log do MongoDB encontrado")
@@ -791,7 +833,23 @@ def show_main_dashboard(df):
             sample_cols = ['channel', 'uf', 'priority', 'created_at']
             if 'protocolo' in df.columns:
                 sample_cols.insert(0, 'protocolo')
-            st.write(df[sample_cols].head())
+            # Sanitize sample before sending to Streamlit to avoid pyarrow JSON/metadata errors
+            sample_df = df[sample_cols].head().copy()
+
+            # Convert object columns that contain non-primitive values to strings
+            def _is_primitive(x):
+                return isinstance(x, (str, int, float, bool, type(None))) or pd.isna(x) or isinstance(x, (pd.Timestamp, datetime, timedelta))
+
+            for col in sample_df.columns:
+                if sample_df[col].dtype == 'object':
+                    if sample_df[col].apply(lambda x: not _is_primitive(x)).any():
+                        sample_df[col] = sample_df[col].astype(str)
+
+            # Ensure datetime-like columns are formatted as strings for safe display
+            for dt_col in sample_df.select_dtypes(include=['datetime64[ns]', 'datetimetz']).columns:
+                sample_df[dt_col] = sample_df[dt_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+            st.write(sample_df)
 
     # Normalize column names that may come from different sources (Portuguese vs English)
     # Ensure we have the expected keys used across the app
