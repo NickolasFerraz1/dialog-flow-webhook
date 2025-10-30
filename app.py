@@ -73,15 +73,22 @@ def sanitize_for_streamlit(df: pd.DataFrame, max_rows: int | None = None) -> pd.
             except Exception:
                 return repr(x)
 
+    # Convert ALL object columns to string to avoid pyarrow serialization issues
     for col in out.columns:
         if out[col].dtype == 'object':
-            # apply safe serializer only if there is some non-primitive value
-            if out[col].apply(lambda v: not (pd.isna(v) or isinstance(v, (str, int, float, bool, pd.Timestamp, datetime, timedelta)))).any():
-                out[col] = out[col].apply(_safe_serialize)
+            out[col] = out[col].apply(_safe_serialize)
 
     # ensure datetimes are converted to strings to avoid timezone/pyarrow issues
     for dt_col in out.select_dtypes(include=['datetime64[ns]', 'datetimetz']).columns:
         out[dt_col] = out[dt_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+    # Convert any remaining complex dtypes to strings
+    for col in out.columns:
+        if out[col].dtype == 'object' or str(out[col].dtype).startswith('category'):
+            out[col] = out[col].astype(str)
+            
+    # Reset index to avoid any index-related serialization issues
+    out = out.reset_index(drop=True)
 
     return out
 
@@ -832,7 +839,12 @@ def show_mongodb_analysis(df):
             # Raw data
             with st.expander("🔍 Visualizar Logs Brutos"):
                 safe_logs = sanitize_for_streamlit(mongo_logs, max_rows=50)
-                st.dataframe(safe_logs)
+                try:
+                    st.dataframe(safe_logs)
+                except Exception as e:
+                    st.error(f"Erro ao exibir logs brutos: {str(e)}")
+                    st.text("Dados (formato texto):")
+                    st.text(str(safe_logs.head(10)))
         
         else:
             st.warning("Nenhum log do MongoDB encontrado")
@@ -887,7 +899,16 @@ def show_main_dashboard(df):
 
             # Use the generic sanitizer to produce a DataFrame safe for Streamlit/pyarrow
             safe_sample = sanitize_for_streamlit(sample_df, max_rows=10)
-            st.write(safe_sample)
+            
+            # Additional safety check for Streamlit Cloud serialization issues
+            try:
+                st.write(safe_sample)
+            except Exception as e:
+                st.error(f"Erro ao exibir amostra dos dados: {str(e)}")
+                # Fallback: show data as plain text
+                st.text("Dados (formato texto):")
+                for col in safe_sample.columns:
+                    st.text(f"{col}: {list(safe_sample[col].values)}")
 
     # Normalize column names that may come from different sources (Portuguese vs English)
     # Ensure we have the expected keys used across the app
