@@ -91,7 +91,6 @@ async function conectarMongo() {
 async function salvarLog(level, component, message, context = {}) {
     // --- Mascaramento de PII para Logs (Item 3.c) ---
     const maskedContext = { ...context }; 
-    // [ALTERAÇÃO] Adicionado 'queryText' às chaves sensíveis
     const sensitiveKeys = ['nome', 'email', 'descricao', 'descricao_problema', 'uf', 'data_ocorrido', 'queryText']; 
 
     for (const key of sensitiveKeys) {
@@ -590,10 +589,25 @@ app.post('/webhook', checkAuth, async (req, res) => {
         }
     // --- Fim da Rota de Exclusão ---
 
+    // --- [NOVO] --- ROTA: Default Fallback Intent (Item 4.d) ---
+    } else if (intentName === 'Default Fallback Intent') {
+        // Esta é a nossa "Coleta de Frases de Fallback" (Item 4.d)
+        // O logInfo principal (linha 310) já salvou o queryText no MongoDB.
+        // Agora, apenas devolvemos uma resposta amigável.
+        logInfo("Webhook", "Fallback detectado. queryText foi logado.", traceContext);
+        return res.json({ 
+            fulfillmentMessages: [{ 
+                text: { text: [
+                    'Desculpe, não entendi. Você pode tentar de novo?',
+                    'Não compreendi o que você disse. Pode reformular?'
+                ]} 
+            }] 
+        });
+
     } else {
-        // Rota para Intents não tratadas
-        logInfo("Webhook", `Intent "${intentName}" não tratada por este webhook.`, traceContext);
-        return res.json({ fulfillmentMessages: [{ text: { text: [`Intent "${intentName}" não tratada por este webhook.`] } }] });
+        // Rota para outras Intents (ex: Default Welcome) não tratadas
+        logInfo("Webhook", `Intent "${intentName}" não tratada (mas não é Fallback).`, traceContext);
+        return res.json({ fulfillmentMessages: [{ text: { text: [`(Ação para "${intentName}" não definida no webhook.)`] } }] });
     }
 });
 
