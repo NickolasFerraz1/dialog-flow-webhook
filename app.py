@@ -85,6 +85,53 @@ def sanitize_for_streamlit(df: pd.DataFrame, max_rows: int | None = None) -> pd.
 
     return out
 
+
+def diagnose_problem_columns(df: pd.DataFrame, sample_rows: int = 10) -> None:
+    """Print diagnostic info for columns that contain non-primitive values.
+
+    This prints the column name, dtype and up to `sample_rows` values with their
+    Python types to help debug pyarrow/streamlit serialization issues on Cloud.
+    """
+    if df is None or df.empty:
+        print("[diagnose] dataframe empty or None")
+        return
+
+    def _is_primitive(x):
+        return isinstance(x, (str, int, float, bool, type(None))) or pd.isna(x) or isinstance(x, (pd.Timestamp, datetime, timedelta))
+
+    print("[diagnose] Starting problem column detection...")
+    problematic = []
+    head = df.head(sample_rows)
+    for col in df.columns:
+        # if column dtype object, check sample for non-primitive values
+        if df[col].dtype == 'object':
+            has_non_prim = head[col].apply(lambda v: not _is_primitive(v)).any()
+            if has_non_prim:
+                problematic.append(col)
+
+    if not problematic:
+        print("[diagnose] No problematic object columns detected in sample.")
+        return
+
+    print(f"[diagnose] Problematic columns found: {problematic}")
+    for col in problematic:
+        print(f"[diagnose] Column: '{col}' dtype={df[col].dtype}")
+        for i, val in enumerate(head[col].tolist()):
+            try:
+                tname = type(val).__name__
+            except Exception:
+                tname = 'UNKNOWN'
+            # show truncated repr to avoid huge logs
+            try:
+                vrepr = repr(val)
+            except Exception:
+                vrepr = '<unrepresentable>'
+            if len(vrepr) > 200:
+                vrepr = vrepr[:200] + '...'
+            print(f"  [{i}] type={tname} value={vrepr}")
+
+    print("[diagnose] End of diagnostic output")
+
 # Optional DB connectors
 try:
     from pymongo import MongoClient
@@ -833,23 +880,14 @@ def show_main_dashboard(df):
             sample_cols = ['channel', 'uf', 'priority', 'created_at']
             if 'protocolo' in df.columns:
                 sample_cols.insert(0, 'protocolo')
-            # Sanitize sample before sending to Streamlit to avoid pyarrow JSON/metadata errors
             sample_df = df[sample_cols].head().copy()
 
-            # Convert object columns that contain non-primitive values to strings
-            def _is_primitive(x):
-                return isinstance(x, (str, int, float, bool, type(None))) or pd.isna(x) or isinstance(x, (pd.Timestamp, datetime, timedelta))
+            # Diagnostic: log problematic columns/types for this sample (helps Cloud debugging)
+            diagnose_problem_columns(sample_df, sample_rows=10)
 
-            for col in sample_df.columns:
-                if sample_df[col].dtype == 'object':
-                    if sample_df[col].apply(lambda x: not _is_primitive(x)).any():
-                        sample_df[col] = sample_df[col].astype(str)
-
-            # Ensure datetime-like columns are formatted as strings for safe display
-            for dt_col in sample_df.select_dtypes(include=['datetime64[ns]', 'datetimetz']).columns:
-                sample_df[dt_col] = sample_df[dt_col].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-            st.write(sample_df)
+            # Use the generic sanitizer to produce a DataFrame safe for Streamlit/pyarrow
+            safe_sample = sanitize_for_streamlit(sample_df, max_rows=10)
+            st.write(safe_sample)
 
     # Normalize column names that may come from different sources (Portuguese vs English)
     # Ensure we have the expected keys used across the app
